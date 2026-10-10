@@ -10,12 +10,12 @@ def tc(t, fps):
     fr = int(round(t * fps)); ff = int(round(fps))
     return f"{fr // (3600 * ff):02d}:{fr // (60 * ff) % 60:02d}:{fr // ff % 60:02d}:{fr % ff:02d}"
 
-def write_edl(segs, mp4, path, fps):
+def write_edl(segs, mp4, path, fps, digits=2):
     name = os.path.basename(mp4); rec = 0.0
     with open(path, 'w') as fh:
         fh.write(f"TITLE: {os.path.splitext(name)[0]}_cuts\nFCM: NON-DROP FRAME\n\n")
         for i, s in enumerate(segs, 1):
-            fh.write(f"{i:03d}  AX       V     C        {tc(s['start'], fps)} {tc(s['end'], fps)} {tc(rec, fps)} {tc(rec + s['duration'], fps)}\n")
+            fh.write(f"{i:0{digits}d}  AX       V     C        {tc(s['start'], fps)} {tc(s['end'], fps)} {tc(rec, fps)} {tc(rec + s['duration'], fps)}\n")
             fh.write(f"* FROM CLIP NAME: {name}\n* COMMENT: {s['label']} {s['duration']:.1f}s\n\n")
             rec += s['duration']
 
@@ -29,7 +29,7 @@ def encoder_args(mode, bitrate):
     return (['-c:v', 'prores_videotoolbox', '-profile:v', '3', '-pix_fmt', 'p210le'] if platform.system() == 'Darwin'
             else ['-c:v', 'prores_ks', '-profile:v', '3', '-pix_fmt', 'yuv422p10le'])   # ProRes 422 HQ 10-bit
 
-def cut(mp4, segs, outdir, mode='copy', fps=59.94, bitrate='80M'):
+def cut(mp4, segs, outdir, mode='copy', fps=59.94, bitrate='80M', digits=2):
     os.makedirs(outdir, exist_ok=True); base = os.path.splitext(os.path.basename(mp4))[0]
     kf = keyframes(mp4) if mode == 'copy' else None
     paths = []
@@ -38,7 +38,7 @@ def cut(mp4, segs, outdir, mode='copy', fps=59.94, bitrate='80M'):
         if mode == 'copy':   # snap inward to keyframes so the clip starts cleanly with no re-encode
             start = min([k for k in kf if k >= start - 1e-3] or [start])
             if start >= end: continue
-        out = os.path.join(outdir, f"{base}_{i:02d}_{s['label'].replace('>', '-')}_{start:.1f}s.mp4")
+        out = os.path.join(outdir, f"{base}_{i:0{digits}d}_{s['label'].replace('>', '-')}_{start:.1f}s.mp4")
         cmd = ['ffmpeg', '-v', 'error', '-y', '-ss', f'{start:.6f}', '-to', f'{end:.6f}', '-i', mp4, '-map', '0:v:0', '-an']
         if mode == 'copy':
             cmd += ['-c', 'copy', '-avoid_negative_ts', 'make_zero']

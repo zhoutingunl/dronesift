@@ -1,6 +1,6 @@
 [project]
 name = "dronesift"
-version = "0.1.0"
+version = "0.2.0"
 description = "Find the steady, cinematic moves in your DJI drone footage and cut them — losslessly, or straight to an EDL for DaVinci / Premiere / FCP."
 readme = "README.md"
 license = "Apache-2.0"
@@ -23,6 +23,12 @@ Homepage = "https://github.com/zhoutingunl/dronesift"
 
 [project.scripts]
 dronesift = "dronesift.__main__:main"
+
+[project.gui-scripts]
+dronesift-gui = "dronesift.gui.main:main"
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.6"]
 
 [dependency-groups]
 dev = ["pytest>=8.3"]

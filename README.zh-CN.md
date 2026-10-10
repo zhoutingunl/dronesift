@@ -19,6 +19,7 @@ uv run python -m dronesift /path/to/DJI_xxx.MP4                 # 默认:无损�
 uv run python -m dronesift /path/to/DJI_xxx.MP4 --mode encode   # 精确到帧,HEVC 10-bit(videotoolbox / libx265)
 uv run python -m dronesift /path/to/DJI_xxx.MP4 --mode prores   # ProRes 422 HQ,给达芬奇二次调色
 uv run python -m dronesift /path/to/DJI_xxx.MP4 --mode none     # 只出 EDL/JSON/图,不切文件
+uv run python -m dronesift x.MP4 --max-shot-s 8                 # 追加切成片级镜头(≤8s,输出到 shots/)
 uv run python -m dronesift x.MP4 --min-len-s 2 --jitter-px 0.8 --acc-h 1.5   # 放宽阈值
 ```
 
@@ -143,6 +144,23 @@ kept frames 91.2%  ->  1 segments, 11.0s
 
 `./batch.sh DIR...` 两个并发遍历目录里的所有 MP4;`uv run python -m dronesift.summary OUT DIR...` 汇总所有结果为一张
 index.html(每条视频的时长/保留率/运镜序列/时间线缩略图)和 segments.csv。
+
+## GUI(实验性)
+
+一个最小的 PySide6 应用,覆盖"拖入文件夹 → 后台分析 → 审查 → 导出"的完整流程:
+
+```bash
+uv sync --extra gui
+uv run dronesift-gui
+```
+
+添加素材文件夹后队列自动跑(两个并发);双击已完成的行,交互报告会在应用内打开(未装 QtWebEngine
+时退回浏览器),右侧是镜头清单——取消勾选不要的镜头,点"重新导出"即无损 copy 到 `<out>/export/`
+(含 EDL + FCPXML)。
+
+**镜头化**(`--max-shot-s`,默认关):成片剪辑里每个镜头通常 4–10s,平均 6s 左右。开启后长运镜段会
+自动切成不超过 max_shot_s 的成片级镜头:切点优先选运镜子类型边界,否则选画面最平静的时刻
+(避开抖动爆发±0.5s),不足 min_shot_s 的尾巴并回上一段。
 
 ## 状态与边界
 

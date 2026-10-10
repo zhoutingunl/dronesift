@@ -45,6 +45,7 @@ uv run dronesift DJI_xxx.MP4                  # default: lossless copy-mode clip
 uv run dronesift DJI_xxx.MP4 --mode encode   # frame-exact HEVC 10-bit (Videotoolbox / libx265)
 uv run dronesift DJI_xxx.MP4 --mode prores   # ProRes 422 HQ for grading
 uv run dronesift DJI_xxx.MP4 --mode none     # EDL / JSON / report only, no files cut
+uv run dronesift DJI_xxx.MP4 --max-shot-s 8  # also split into edit-ready shots <= 8 s (shots/ folder)
 uv run dronesift DJI_xxx.MP4 --jitter-px 40 --min-len-s 2   # relax thresholds
 ```
 
@@ -54,7 +55,9 @@ Outputs, written next to the video in `<video>_cuts/`:
 |---|---|
 | `<name>_segments.json` | per-segment start/end (time + frame), move-label sequence, jitter, speed, gimbal rates, orbit radius |
 | `<name>.edl` | CMX3600 EDL referencing the **original** file — import into Resolve/Premiere/FCP with no re-encode |
+| `<name>.fcpxml` | FCPXML 1.9 spine (same edit) — imports into Final Cut Pro and Resolve |
 | `<name>_NN_<label>_<t>s.mp4` | the cut clips (copy mode snaps to keyframes and remuxes losslessly) |
+| `<name>_shots.json`, `<name>_shots.edl`, `shots/` | with `--max-shot-s`: segments split into edit-ready shots (edited drone cuts average 4–10 s per shot) |
 | `<name>_viz.html` | interactive trajectory + timeline report |
 | `<name>_timeline.png` | static diagnostic chart (jitter, motion, telemetry vs thresholds) |
 | `<name>_telemetry.csv`, `<name>_flow.csv` | cached per-frame telemetry / optical flow — re-running with new thresholds takes seconds |
@@ -104,6 +107,19 @@ Full engineering notes (in Chinese, with worked failure cases) are in
 
 `./batch.sh DIR...` walks directories of MP4s two at a time and `python -m dronesift.summary OUT DIR...`
 builds a browsable index of every flight with its timeline chart and labels.
+
+## GUI (experimental)
+
+A minimal PySide6 app for the drop-folder → review → export loop:
+
+```bash
+uv sync --extra gui
+uv run dronesift-gui
+```
+
+Add a folder of flights, let the queue run (2 videos at a time), then double-click a finished
+row: the interactive report opens in-app (or your browser) with a shot checklist on the side —
+untick what you don't want and re-export the selection losslessly into `<out>/export/`.
 
 ## Status & caveats
 

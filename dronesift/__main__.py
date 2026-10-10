@@ -50,15 +50,26 @@ def main():
     js = os.path.join(out, base + '_segments.json')
     json.dump(dict(video=video, fps=fps, frames=n, thresholds=thr, segments=segs), open(js, 'w'), indent=1)
     cutmod.write_edl(segs, video, os.path.join(out, base + '.edl'), fps)
+    # edit-ready shots (<= max_shot_s): own json/EDL + clips in <out>/shots, and the FCPXML uses them
+    shots = seg.shots(segs, f, labels, thr, fps) if thr.get('max_shot_s') else []
+    if shots:
+        json.dump(dict(video=video, fps=fps, frames=n, thresholds=thr, shots=shots),
+                  open(os.path.join(out, base + '_shots.json'), 'w'), indent=1)
+        cutmod.write_edl(shots, video, os.path.join(out, base + '_shots.edl'), fps, digits=3)
+    from . import fcpxml
+    fcpxml.write(shots or segs, video, os.path.join(out, base + '.fcpxml'), fps)
     plot.timeline(f, keep, segs, thr, os.path.join(out, base + '_timeline.png'), fps, title=base)
     try:
         from . import viz; viz.build(video, os.path.join(out, base + '_telemetry.csv'), flow_csv, js, os.path.join(out, base + '_viz.html'), hwaccel=a.hwaccel)
     except Exception as e: print('viz failed:', e, file=sys.stderr)
-    print(f"kept frames {keep.mean() * 100:.1f}%  ->  {len(segs)} segments, {sum(s['duration'] for s in segs):.1f}s")
+    print(f"kept frames {keep.mean() * 100:.1f}%  ->  {len(segs)} segments, {sum(s['duration'] for s in segs):.1f}s"
+          + (f"; {len(shots)} shots" if shots else ''))
     for s in segs:
         print(f"  {seg.hms(s['start'])} - {seg.hms(s['end'])}  {s['duration']:5.1f}s  {s['label']:28s} jitter={s['jitter_px']:.1f}px/s v={s['speed_mps']:.1f}m/s yaw={s['yaw_rate_dps']:+.1f}°/s climb={s['climb_mps']:+.1f}m/s" + (f" r≈{s['radius_m']:.0f}m" if s.get('radius_m') else ''))
     if a.mode != 'none' and segs:
         cutmod.cut(video, segs, out, a.mode, fps, bitrate=a.bitrate)
+        if shots:
+            cutmod.cut(video, shots, os.path.join(out, 'shots'), a.mode, fps, bitrate=a.bitrate, digits=3)
     print('outputs in', out)
 
 if __name__ == '__main__':

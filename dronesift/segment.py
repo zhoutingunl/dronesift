@@ -121,6 +121,8 @@ DEFAULT_THR = dict(
     min_len_s=3.0, merge_gap_s=0.5, trim_s=0.3,
     label_min_s=3.0, label_filter_s=2.0, climb_rate=1.0,  # sub-moves shorter than label_min_s are not named; labels mode-filtered over label_filter_s
     split_labels=0,       # 1 = also cut segments where the move type changes (old behaviour)
+    max_shot_s=0.0,       # shot-ification: split segments into edit-ready shots <= max_shot_s (0 = off)
+    target_shot_s=6.0, min_shot_s=4.0,   # preferred shot length; remainder shorter than min is merged back
     hover_speed=0.4, pan_rate=1.5,
     orbit_rate=0.8, orbit_r_min=1.0, orbit_r_max=1000.0,  # orbit: yaw rate >= orbit_rate deg/s and implied radius v_lat/yaw_rate in range
 )
@@ -259,6 +261,65 @@ def run(tel_csv, flow_csv, out_json, thr=None, fps=FPS):
 
 def hms(t):
     return f"{int(t // 60):02d}:{t % 60:06.3f}"
+
+def _shot(f, labels, a, b, fps, seg_i):
+    sl = slice(a, b + 1)
+    u, c = np.unique(labels[sl], return_counts=True)
+    lab = str(u[np.argmax(c)])
+    return dict(start_frame=int(a), end_frame=int(b), start=a / fps, end=(b + 1) / fps,
+                duration=(b - a + 1) / fps, label=lab, base=lab.partition('+')[0], segment=seg_i,
+                jitter_px=float(np.nanmean(f['jitter_burst'][sl])), speed_mps=float(f['speed3'][sl].mean()),
+                yaw_rate_dps=float(f['yaw_rate'][sl].mean()))
+
+def shots(segs, f, labels, thr, fps=FPS):
+    """Split segments into edit-ready shots <= max_shot_s (edited drone cuts average 4-10 s per shot).
+
+    Cut points prefer sub-move label boundaries inside the window [min_shot_s, max_shot_s] ahead of the
+    cut, choosing the one closest to target_shot_s; without a boundary, the calmest moment (low
+    jitter_burst + motion_acc) near the target is used. A remainder shorter than min_shot_s is merged
+    back into the previous shot. max_shot_s = 0 disables and returns [].
+    """
+    tmax, ttar, tmin = thr.get('max_shot_s', 0.0), thr.get('target_shot_s', 6.0), thr.get('min_shot_s', 4.0)
+    if not tmax:
+        return []
+    lab = labels.astype(str)
+    bounds = np.nonzero(lab[1:] != lab[:-1])[0] + 1
+    score = np.asarray(f['jitter_burst']) + np.asarray(f['motion_acc']) / 100.0
+    hot = np.asarray(f['jitter_burst']) > thr['jitter_px']               # shake bursts: keep cut points away
+    pad = int(0.5 * fps)
+    if pad and hot.any():
+        hot = np.convolve(hot.astype(float), np.ones(2 * pad + 1), mode='same') > 0
+    out = []
+    for si, s in enumerate(segs):
+        a, b = s['start_frame'], s['end_frame']
+        if (b - a + 1) / fps <= tmax:
+            out.append(_shot(f, labels, a, b, fps, si)); continue
+        cur = a
+        while (b - cur + 1) / fps > tmax:
+            lo, hi = cur + int(tmin * fps), min(cur + int(tmax * fps), b - int(tmin * fps))
+            if hi < lo: hi = cur + int(tmax * fps)            # tiny remainder: allow full window, merge below
+            tgt = cur + int(ttar * fps)
+            cand = bounds[(bounds >= lo) & (bounds <= hi)]
+            pool = cand[(b - cand) / fps >= tmin] if len(cand) else cand
+            if len(pool):
+                c = int(pool[np.argmin(np.abs(pool - tgt))])   # boundary closest to the target length
+            else:
+                l2, h2 = max(lo, tgt - int(1.5 * fps)), min(hi, tgt + int(1.5 * fps))
+                quiet = np.nonzero(~hot[l2:h2 + 1])[0] if h2 > l2 else np.arange(0)
+                if h2 > l2 and quiet.size:
+                    wq = np.nan_to_num(score[l2:h2 + 1][quiet], nan=np.inf)
+                    calm = quiet[wq <= wq.min() + max(1e-9, 0.05 * wq.min())]
+                    c = l2 + int(calm[np.argmin(np.abs(l2 + calm - tgt))])   # calmest, then closest to target
+                else:
+                    c = cur + int(tmax * fps)
+            out.append(_shot(f, labels, cur, c - 1, fps, si))  # cut c is the next shot's first frame
+            cur = c
+        if (b - cur + 1) / fps < tmin and out:                 # merge a stub back into the previous shot
+            p = out[-1]; out[-1] = _shot(f, labels, p['start_frame'], b, fps, si)
+        else:
+            out.append(_shot(f, labels, cur, b, fps, si))
+    for i, s in enumerate(out): s['shot'] = i
+    return out
 
 if __name__ == '__main__':
     import sys
