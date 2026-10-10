@@ -85,7 +85,9 @@ analysis pass).
    are calm *and* telemetry shows no stick jerks (along-track acceleration, gimbal angular
    acceleration). Image wins over telemetry when they disagree — smoothly tracking a moving
    car looks fine even though ground-frame acceleration is wild. Inside orbits the yaw-acceleration
-   limit relaxes by the orbit radius.
+   limit relaxes by the orbit radius. Short shake bursts (a manual gimbal-dial snap) get a
+   dedicated 0.15 s RMS detector — the sustained-shake median filter would dilute them below
+   threshold — and break the segment instead of being merged across.
 4. **Labelling** — kept runs are merged across sub-second gaps, trimmed, and described as a
    move sequence: `push_in>orbit_CW`, `pull_back+pan>orbit_CCW`, `dronie`, `spiral_out`,
    `truck_L`, ... with the implied orbit radius from v_lat / yaw rate.

@@ -85,7 +85,11 @@ def features(tel, flow, fps=FPS, tel_sigma_s=0.5, vis_sigma_s=1.0, hf_sigma_s=0.
     jit[~ok] = np.nan
     win = max(3, int(0.5 * fps) | 1)
     fill = np.nanmax(jit**2) if np.isfinite(np.nanmax(jit**2)) else 0
-    f['jitter'] = jit; f['jitter_rms'] = np.sqrt(median_filter(np.nan_to_num(jit**2, nan=fill), size=win))
+    jit2 = np.nan_to_num(jit**2, nan=fill)
+    f['jitter'] = jit; f['jitter_rms'] = np.sqrt(median_filter(jit2, size=win))
+    # short-window rms: a 0.1-0.3 s shake burst (manual dial snap) is diluted below jitter_rms
+    # by the 0.5 s median filter, but clearly visible; single-frame flow glitches are not (yet)
+    f['jitter_burst'] = np.sqrt(uniform_filter1d(jit2, max(3, int(0.15 * fps) | 1)))
     msm = gaussian_filter1d(np.hypot(jdx, jdy), s_v)
     f['motion_px'] = msm + np.abs(f['da_sm']) * w / 2 + np.abs(f['ds_sm']) * w / 2     # px/s
     f['motion_acc'] = np.abs(_deriv(f['motion_px'], fps))                               # px/s^2
@@ -104,6 +108,8 @@ def features(tel, flow, fps=FPS, tel_sigma_s=0.5, vis_sigma_s=1.0, hf_sigma_s=0.
 
 DEFAULT_THR = dict(
     jitter_px=30.0,       # rms image motion above ~1 Hz, px/s at 640px width (≈0.5 px/frame @60fps)
+    jitter_spike_px=45.0, # 0.15 s rms shake burst (manual dial snap, ≈0.75 px/frame); lasts >= spike_min_frames
+    spike_min_frames=3, spike_pad_s=0.35,  # min burst length to act on; pad each side so the hole defeats merge_gap_s
     acc_h=1.2, acc_z=1.0, # m/s^2, along-track / vertical acceleration (stick inputs); centripetal accel is not counted
     accel_veto_rel=0.5,   # ...and only vetoes when image motion accel is above this fraction of its threshold
     yaw_acc=8.0, pitch_acc=8.0,  # deg/s^2, gimbal angular acceleration (for orbits, relaxed to acc_h / radius)
@@ -145,6 +151,15 @@ def base_labels(f, thr, fps=FPS):
         u, c = np.unique(labels[max(0, i - half): i + half + 1], return_counts=True); out[i] = u[np.argmax(c)]
     return out
 
+def spike_mask(f, thr, fps=FPS):
+    """Frames hit by a visible shake burst: 0.15 s rms above jitter_spike_px for >= spike_min_frames,
+    padded by spike_pad_s so the vetoed hole outlasts merge_gap_s and actually splits the segment."""
+    from scipy.ndimage import binary_dilation, binary_erosion
+    hot = f['jitter_burst'] > thr['jitter_spike_px']
+    hot = binary_erosion(hot, structure=np.ones(max(1, int(thr['spike_min_frames']))), border_value=1)
+    pad = int(thr['spike_pad_s'] * fps)
+    return binary_dilation(hot, structure=np.ones(2 * pad + 1)) if pad else hot
+
 def keep_mask(f, thr, labels=None):
     n = len(f['speed3'])
     orbit = np.zeros(n, bool) if labels is None else np.char.startswith(labels.astype(str), 'orbit')
@@ -160,6 +175,7 @@ def keep_mask(f, thr, labels=None):
     keep = image_ok & gimbal_ok & ~accel_veto
     keep &= (f['expo_jump'] < thr['expo_jump']) & (np.abs(np.gradient(f['ev'])) == 0)   # exposure jumps / EV dial changes
     keep &= f['tel_ok']                                                                 # frames without telemetry cannot be judged
+    keep &= ~spike_mask(f, thr)                                                         # short shake bursts must break the segment
     return keep
 
 def classify_frames(f, thr, fps=FPS):

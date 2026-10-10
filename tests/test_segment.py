@@ -20,7 +20,7 @@ def make_feat(n, **over):
              vx=np.full(n, 3.0), vy=z, vz=z, g_yaw=z, g_pitch=np.full(n, -10.0), ac_yaw_rate=z,
              yaw_rate=z, pitch_rate=z, yaw_acc=one, pitch_acc=one, acc_h=z, acc_z=z, acc_tan=z,
              rel_alt=np.full(n, 20.0), iso=np.full(n, 100.0), ev=z, expo_jump=np.full(n, 0.1),
-             jitter=one, jitter_rms=one, motion_px=np.full(n, 100.0), motion_acc=np.full(n, 10.0),
+             jitter=one, jitter_rms=one, jitter_burst=one, motion_px=np.full(n, 100.0), motion_acc=np.full(n, 10.0),
              vmag=np.full(n, 100.0), consist=one, radius=np.full(n, 100.0), blur_drop=one,
              residual=np.full(n, 0.1), n_tracks=np.full(n, 50.0),
              dx_raw=z, dy_raw=z, da_raw=z, ds_raw=z, dx_sm=z, dy_sm=z, da_sm=z, ds_sm=z,
@@ -75,6 +75,30 @@ def test_keep_mask_relaxes_yaw_acc_inside_orbits():
     f = make_feat(30, radius=np.full(30, 5.0), yaw_acc=np.full(30, 10.0))   # 10 > yaw_acc 8, < acc_h/r = 13.7 deg/s2
     assert seg.keep_mask(f, thr, np.array(['orbit'] * 30)).all()
     assert not seg.keep_mask(f, thr, np.array(['push'] * 30)).any()
+
+def test_spike_burst_splits_segment():
+    """A 0.1-0.3 s shake burst must split the segment; the 0.15 s rms metric catches what
+    the 0.5 s median filter dilutes below jitter_px (the manual-dial-twitch failure mode)."""
+    fps = 10
+    burst = np.ones(200)
+    burst[100:106] = 60.0                                  # 0.6 s of 60 px/s, rms stays ~26 < jitter_px 30
+    f = make_feat(200, jitter_burst=burst)
+    thr = dict(seg.DEFAULT_THR)
+    spikes = seg.spike_mask(f, thr, fps)
+    assert spikes[98:108].all() and not spikes[:96].any()  # eroded run padded by +-0.35 s, rest untouched
+    keep = seg.keep_mask(f, thr)
+    segs = seg.segments(f, keep, np.array(['push'] * 200), thr, fps)
+    assert len(segs) == 2                                  # the burst breaks the segment for real
+
+def test_spike_ignores_single_frame_glitch():
+    """1-2 frame optical-flow outliers reach high burst values but must not split anything."""
+    fps = 10
+    glitch = np.ones(200); glitch[100] = 400.0             # one bad frame -> 0.15 s rms ~ 100+
+    glitch[150:152] = 400.0
+    f = make_feat(200, jitter_burst=glitch)
+    thr = dict(seg.DEFAULT_THR)
+    assert not seg.spike_mask(f, thr, fps).any()
+    assert seg.keep_mask(f, thr).all()
 
 def test_segments_merges_short_gaps_and_trims():
     fps = 10; f = make_feat(100); labels = np.array(['push'] * 100)
