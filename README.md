@@ -84,13 +84,15 @@ analysis pass).
 2. **Image motion** — ffmpeg decodes to 640×360 grayscale; Shi-Tomasi corners + LK optical
    flow + a RANSAC similarity give per-frame translation/rotation/zoom; the **median** feature
    displacement (robust to parallax) is the jitter measure.
-3. **Fusion** — a frame is kept only if image jitter, motion acceleration, blur and exposure
-   are calm *and* telemetry shows no stick jerks (along-track acceleration, gimbal angular
-   acceleration). Image wins over telemetry when they disagree — smoothly tracking a moving
-   car looks fine even though ground-frame acceleration is wild. Inside orbits the yaw-acceleration
-   limit relaxes by the orbit radius. Short shake bursts (a manual gimbal-dial snap) get a
-   dedicated 0.15 s RMS detector — the sustained-shake median filter would dilute them below
-   threshold — and break the segment instead of being merged across.
+3. **Fusion** — a frame is kept only if the image is free of *perceptual shake* and telemetry
+   shows no stick jerks. Perceptual shake is motion that **reverses** (deviates from its path and
+   comes back): the fraction of frames whose high-frequency flow flips direction within 0.1 s gates
+   every image veto. A violent excursion that never reverses — a whip tilt, a MasterShots move —
+   reads as an intentional move and is kept, however fast; motion that oscillates is dropped even
+   at small amplitude. Telemetry (aircraft/gimbal acceleration) only vetoes frames whose image is
+   actually oscillating. Short shake bursts (a manual dial snap) get a dedicated 0.15 s RMS
+   detector — the sustained-shake median filter would dilute them below threshold — and break the
+   segment instead of being merged across.
 4. **Labelling** — kept runs are merged across sub-second gaps, trimmed, and described as a
    move sequence: `push_in>orbit_CW`, `pull_back+pan>orbit_CCW`, `dronie`, `spiral_out`,
    `truck_L`, ... with the implied orbit radius from v_lat / yaw rate.

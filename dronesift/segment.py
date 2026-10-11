@@ -93,6 +93,17 @@ def features(tel, flow, fps=FPS, tel_sigma_s=0.5, vis_sigma_s=1.0, hf_sigma_s=0.
     msm = gaussian_filter1d(np.hypot(jdx, jdy), s_v)
     f['motion_px'] = msm + np.abs(f['da_sm']) * w / 2 + np.abs(f['ds_sm']) * w / 2     # px/s
     f['motion_acc'] = np.abs(_deriv(f['motion_px'], fps))                               # px/s^2
+    # perceptual shake = image motion that REVERSES (oscillates around its path: deviates and comes
+    # back). A single fast excursion (whip tilt/pan, MasterShots moves) never reverses and reads as
+    # an intentional move, however violent. Metric: fraction of frames whose hf flow flips sign in 0.1 s.
+    hx, hy = jdx - gaussian_filter1d(jdx, s_h), jdy - gaussian_filter1d(jdy, s_h)
+    lag = max(1, int(0.1 * fps))
+    en = np.hypot(hx, hy)
+    live = (en > 3.0).astype(float)
+    live_lag = np.concatenate((np.zeros(lag), live[:-lag]))
+    flip = ((hx[lag:] * hx[:-lag] + hy[lag:] * hy[:-lag]) < 0).astype(float)
+    flip = np.concatenate((np.zeros(lag), flip)) * np.minimum(live, live_lag)
+    f['hf_flip'] = uniform_filter1d(flip, max(3, int(0.3 * fps) | 1))
     # directional consistency of the image motion over a 2 s window: |sum v| / sum |v|  (1 = steady move, ~0 = wobble)
     vx, vy = gaussian_filter1d(jdx, 0.3 * fps), gaussian_filter1d(jdy, 0.3 * fps); mag = np.hypot(vx, vy)
     win2 = int(2.0 * fps) | 1
@@ -108,6 +119,10 @@ def features(tel, flow, fps=FPS, tel_sigma_s=0.5, vis_sigma_s=1.0, hf_sigma_s=0.
 
 DEFAULT_THR = dict(
     jitter_px=30.0,       # rms image motion above ~1 Hz, px/s at 640px width (≈0.5 px/frame @60fps)
+    hf_flip=0.25,         # perceptual shake gate: image motion only counts as shake when it REVERSES
+                          # (>= this fraction of frames flip hf direction in 0.1 s). A violent but
+                          # never-reversing excursion (whip tilt, MasterShots moves) is an intentional
+                          # move. 0 disables the gate (legacy behaviour).
     jitter_spike_px=45.0, # 0.15 s rms shake burst (manual dial snap, ≈0.75 px/frame); lasts >= spike_min_frames
     spike_min_frames=3, spike_pad_s=0.35,  # min burst length to act on; pad each side so the hole defeats merge_gap_s
     acc_h=1.2, acc_z=1.0, # m/s^2, along-track / vertical acceleration (stick inputs); centripetal accel is not counted
@@ -154,10 +169,10 @@ def base_labels(f, thr, fps=FPS):
     return out
 
 def spike_mask(f, thr, fps=FPS):
-    """Frames hit by a visible shake burst: 0.15 s rms above jitter_spike_px for >= spike_min_frames,
-    padded by spike_pad_s so the vetoed hole outlasts merge_gap_s and actually splits the segment."""
+    """Frames hit by a visible shake burst: 0.15 s rms above jitter_spike_px for >= spike_min_frames
+    AND reversing (hf_flip), padded by spike_pad_s so the hole outlasts merge_gap_s and splits the segment."""
     from scipy.ndimage import binary_dilation, binary_erosion
-    hot = f['jitter_burst'] > thr['jitter_spike_px']
+    hot = (f['jitter_burst'] > thr['jitter_spike_px']) & (f['hf_flip'] > thr['hf_flip'])
     hot = binary_erosion(hot, structure=np.ones(max(1, int(thr['spike_min_frames']))), border_value=1)
     pad = int(thr['spike_pad_s'] * fps)
     return binary_dilation(hot, structure=np.ones(2 * pad + 1)) if pad else hot
@@ -169,15 +184,19 @@ def keep_mask(f, thr, labels=None):
     yaw_thr = np.where(orbit, np.maximum(thr['yaw_acc'], np.degrees(thr['acc_h'] / np.maximum(f['radius'], 1.0))), thr['yaw_acc'])
     m_thr = np.maximum(thr['motion_acc'], thr['motion_acc_rel'] * f['motion_px'])
     wobble = (f['consist'] < thr['consist']) & (f['vmag'] > thr['consist_floor'])
-    image_ok = (f['jitter_rms'] < thr['jitter_px']) & (f['motion_acc'] < m_thr) & (f['blur_drop'] > thr['blur_drop']) & f['flow_ok'] & ~wobble
-    gimbal_ok = (f['yaw_acc'] < yaw_thr) & (f['pitch_acc'] < thr['pitch_acc'])
+    # only reversing image motion counts as shake; a violent coherent excursion is an intentional move
+    shake = f['hf_flip'] > thr['hf_flip']
+    image_ok = ((f['jitter_rms'] < thr['jitter_px']) & (f['motion_acc'] < m_thr) | ~shake) \
+        & (f['blur_drop'] > thr['blur_drop']) & f['flow_ok'] & ~wobble
+    gimbal_ok = ((f['yaw_acc'] < yaw_thr) & (f['pitch_acc'] < thr['pitch_acc'])) | ~shake
     # ground-frame acceleration is ambiguous when tracking a moving subject (circling a car), so it only
-    # vetoes frames whose image motion is already changing noticeably
-    accel_veto = ((f['acc_tan'] > thr['acc_h']) | (f['acc_z'] > thr['acc_z'])) & (f['motion_acc'] > thr['accel_veto_rel'] * m_thr)
+    # vetoes frames whose image motion both changes noticeably AND reverses
+    accel_veto = ((f['acc_tan'] > thr['acc_h']) | (f['acc_z'] > thr['acc_z'])) \
+        & (f['motion_acc'] > thr['accel_veto_rel'] * m_thr) & shake
     keep = image_ok & gimbal_ok & ~accel_veto
     keep &= (f['expo_jump'] < thr['expo_jump']) & (np.abs(np.gradient(f['ev'])) == 0)   # exposure jumps / EV dial changes
     keep &= f['tel_ok']                                                                 # frames without telemetry cannot be judged
-    keep &= ~spike_mask(f, thr)                                                         # short shake bursts must break the segment
+    keep &= ~spike_mask(f, thr)                                                         # shake bursts must break the segment
     return keep
 
 def classify_frames(f, thr, fps=FPS):
