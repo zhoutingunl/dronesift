@@ -96,9 +96,9 @@ def richness(f, sl, base):
                          + 0.15 * min(sharp / 0.6, 1), 0, 1))
 
 def load_track(path):
-    """Hiking track from a KML as (pts Nx2 lon/lat, t seconds from start) — or (pts, None) if the
-    KML carries no <when> timestamps. t pairs with the coordinates; overlapping out-and-back
-    sections are disambiguated by matching the video CAPTURE time against the track time."""
+    """Hiking track from a KML as (pts Nx2 lon/lat, t seconds from start, s metres along track).
+    t/s are None when the KML carries no <when> timestamps. On out-and-back trails s(t) rises to
+    the turnaround then falls; pass 0 = before the turnaround (outbound), pass 1 = after."""
     import re
     from datetime import datetime
     text = open(path, encoding='utf-8', errors='replace').read()
@@ -122,12 +122,16 @@ def load_track(path):
         return None
     pts = np.array(pts)
     if len(whens) != len(pts):
-        return pts, None
+        return pts, None, None
     # axis = seconds from the first track point; both this and 'video filename time minus hike
     # start' share the same clock origin (the KML <name> is the local rendering of whens[0]),
     # so no timezone arithmetic is needed anywhere
     t = np.array([(w - whens[0]).total_seconds() for w in whens])
-    return pts, t
+    import math
+    scale = np.array([111320.0 * math.cos(math.radians(pts[:, 1].mean())), 111320.0])
+    seg = np.diff(pts, axis=0) * scale                  # degrees -> metres
+    s = np.concatenate(([0.0], np.cumsum(np.hypot(seg[:, 0], seg[:, 1]))))
+    return pts, t, s
 
 def capture_time_s(video, t0_local):
     """Seconds from the hike start for a DJI filename (DJI_YYYYMMDDHHMMSS...), or None."""
@@ -143,18 +147,35 @@ def capture_time_s(video, t0_local):
         return None
     return (dt - t0_local).total_seconds()
 
-def track_progress(track, lon, lat, capture_s=None):
-    """Metres along the hiking track for a shot. With a timed track and a capture time, pick the
-    track point closest IN TIME — this resolves out-and-back overlaps where the descent retraces
-    the ascent (nearest-space alone would place afternoon footage at morning positions)."""
-    pts, t = track if isinstance(track, tuple) else (track, None)
+def track_progress(pts, t, s_axis, capture_s=None, lon=None, lat=None):
+    """(arc position s in metres, pass index) for a shot. With a timed track and a capture time,
+    the matching track point is the one closest IN TIME; pass 0 = outbound (before the turnaround,
+    order by s ascending), pass 1 = inbound (order by s descending). Without timing: nearest space,
+    always pass 0. The arc position is refined onto the neighbouring polyline segments, so shots a
+    few metres apart order correctly."""
+    import math
     if t is not None and capture_s is not None:
         i = int(np.argmin(np.abs(t - capture_s)))
+    elif lon is not None:
+        i = int(np.argmin((pts[:, 0] - lon) ** 2 + (pts[:, 1] - lat) ** 2))
     else:
-        d2 = (pts[:, 0] - lon) ** 2 + (pts[:, 1] - lat) ** 2
-        i = int(np.argmin(d2))
-    seg = np.diff(pts, axis=0)
-    return float(np.hypot(seg[:, 0], seg[:, 1])[:i].sum())
+        return 0.0, 0
+    scale = np.array([111320.0 * math.cos(math.radians(pts[:, 1].mean())), 111320.0])
+    q = np.array([lon, lat]) * scale if lon is not None else pts[i] * scale
+    p = pts * scale
+    best = (float(np.hypot(*(p[i] - q))), float(s_axis[i]))
+    for j in (i - 1, i):                               # refine onto segments (j, j+1)
+        if 0 <= j < len(pts) - 1:
+            a, b = p[j], p[j + 1]
+            d = b - a
+            L2 = float(d @ d)
+            tt = 0.0 if L2 == 0 else float(np.clip((q - a) @ d / L2, 0, 1))
+            proj = a + tt * d
+            dist = float(np.hypot(*(proj - q)))
+            if dist < best[0]:
+                best = (dist, float(s_axis[j] + tt * math.sqrt(L2)))
+    turn = int(np.argmax(s_axis))
+    return best[1], (0 if i <= turn or s_axis[turn] == 0 else 1)
 
 class Candidate:
     """One segment that can donate windows; windows are cut from its front, best-quality first strip."""
@@ -192,7 +213,7 @@ class Candidate:
 
 # ---------------------------------------------------------------- assembly
 
-def make_candidates(dirs, variant='_v3', track=None, track_path=None):
+def make_candidates(dirs, variant='_v3', track=None, track_path=None, dedup_r=60.0):
     from . import segment as seg
     cands = []
     for d in dirs:
@@ -219,11 +240,44 @@ def make_candidates(dirs, variant='_v3', track=None, track_path=None):
     for c in cands:
         rank = raw.index(c.rich) / max(1, len(raw) - 1)
         c.rich = 0.15 + 0.8 * rank
-    # montage order = capture time (filename clock). For out-and-back trails the track's spatial
-    # order is ambiguous (the descent retraces the ascent), and time IS the narrative order:
-    # ascend in the morning, descend in the afternoon. The track is used for the GPS map only.
-    cands.sort(key=lambda c: c.order_key)
+    # montage order = narrative order along the hike: pass 0 (outbound, by track position
+    # ascending), then pass 1 (inbound, descending). Within a pass the track position corrects
+    # flights that were flown out of walking sequence. Nearby same-subject flights are deduped.
+    if track is not None and track[1] is not None:
+        pts, t, s_axis = track
+        t0_local = _t0_local(track_path)
+        kept = []
+        for c in sorted(cands, key=lambda c: c.order_key):
+            cap = capture_time_s(c.video, t0_local) if t0_local else None
+            c.s, c.pass_id = track_progress(pts, t, s_axis, cap, c.mlon, c.mlat)
+            dup = False
+            for k in kept:
+                if abs(k.pass_id - c.pass_id) == 0 and _dist_m(k.mlon, k.mlat, c.mlon, c.mlat) < dedup_r:
+                    dup = True
+                    break
+            if dup:
+                print(f'dedup (same spot as an earlier flight): {os.path.basename(c.video)}', file=sys.stderr)
+                continue
+            kept.append(c)
+        cands = kept
+        sgn = np.where(np.array([c.pass_id for c in cands]) == 0, 1, -1)
+        # bucket track position at 100 m: inside a bucket the trail projection cannot resolve
+        # a few metres of GPS noise, so capture time decides; across buckets position wins
+        cands.sort(key=lambda c: (c.pass_id, sgn[c.pass_id] * round(c.s / 100.0), c.order_key))
+    else:
+        # no timed track: dedup by position still applies, ordered by capture time
+        kept = []
+        for c in sorted(cands, key=lambda c: c.order_key):
+            if any(_dist_m(k.mlon, k.mlat, c.mlon, c.mlat) < dedup_r for k in kept):
+                print(f'dedup (same spot as an earlier flight): {os.path.basename(c.video)}', file=sys.stderr)
+                continue
+            kept.append(c)
+        cands = kept
     return cands
+
+def _dist_m(lon1, lat1, lon2, lat2):
+    import math
+    return math.hypot((lon2 - lon1) * math.cos(math.radians(lat1)), lat2 - lat1) * 111320
 
 def _t0_local(track_path):
     """Hike start as a local naive datetime, parsed from the KML <name> ('2026-10-01 09:14:06')."""
@@ -265,18 +319,24 @@ def max_per_flight(n_flights, music_dur, bars):
     need = max(1, int(music_dur / (2 * bar)))              # ~2-bar average shot
     return max(1, min(3, math.ceil(need / max(1, n_flights))))
 
-def plan(cands, bars, max_slots=200, max_per_flight=2, music_end=None):
-    """Location-block montage following the hiking track: candidates arrive sorted by progress
-    along the track, flights become contiguous blocks (A-A-B-B, no interleaving), each flight
-    donates up to max_per_flight windows and, inside a block, move classes alternate when the
-    flight offers both rotation and straight moves. music_end caps the timeline so the silent
-    tail after the song never exceeds ~1 s."""
+def plan(cands, bars, max_slots=200, max_per_flight=2, music_end=None, max_flights=None, max_unit=None):
+    """Location-block montage: candidates arrive in narrative order (hike pass + track position),
+    flights become contiguous blocks (A-A-B-B), each flight donates up to max_per_flight windows.
+    max_flights evenly samples across the blocks when the song is too short for every scene (and
+    then max_unit caps slot length so the sampled scenes actually all fit). music_end caps the
+    timeline so the silent tail after the song never exceeds ~1 s."""
     timeline = []
     i = 0
     bar = bars[1] - bars[0] if len(bars) > 1 else 2.0
     blocks = {}
     for c in cands:
         blocks.setdefault(c.video, []).append(c)
+    if max_flights and len(blocks) > max_flights:
+        keep = sorted(set(np.linspace(0, len(blocks) - 1, max_flights).round().astype(int)))
+        names = list(blocks)
+        blocks = {n: blocks[n] for n in (names[k] for k in keep)}
+        max_unit = min(max_unit or 4, 2)
+        print(f'sampling {len(blocks)} of {len(names)} flights to span the whole hike (slots <= {max_unit} bars)', file=sys.stderr)
 
     def alternate(segs):
         """Order a flight's segments so consecutive move classes differ when possible."""
@@ -299,6 +359,7 @@ def plan(cands, bars, max_slots=200, max_per_flight=2, music_end=None):
                 if placed >= max_per_flight or i >= len(bars) - 1 or len(timeline) >= max_slots:
                     break
                 units = [u for u in BAR_UNITS if u * bar >= DUR_MIN and u * bar <= DUR_MAX
+                         and (max_unit is None or u <= max_unit)
                          and i + u <= len(bars) - 1
                          and (music_end is None or bars[i] + u * bar <= music_end + 1.0)]
                 fit = [u for u in units if c.end - c.cursor >= u * bar * c.fps]
@@ -406,7 +467,11 @@ def build(music_path, dirs, out_mp4, workdir=None, track_path=None):
         print(f'hike track: {len(track[0])} points, timed={track[1] is not None} — montage follows track progress', file=sys.stderr)
     cands = make_candidates(dirs, track=track, track_path=track_path)
     print(f'{len(cands)} candidate segments (from _cuts_v3)', file=sys.stderr)
-    timeline = plan(cands, bars, music_end=dur, max_per_flight=max_per_flight(len(cands), dur, bars))
+    n_flights = len({c.video for c in cands})
+    mpf = max_per_flight(n_flights, dur, bars)
+    budget = max(1, round(dur / (2 * (bars[1] - bars[0]))))   # slots at ~2-bar shots
+    timeline = plan(cands, bars, music_end=dur, max_per_flight=mpf,
+                    max_flights=max(1, min(n_flights, budget // mpf)))
     total = sum(w['duration'] for w in timeline)
     vids = {w['video'] for w in timeline}
     order = 'shooting order (track drawn on the GPS map)'
