@@ -98,8 +98,9 @@ def richness(f, sl, base):
 class Candidate:
     """One segment that can donate windows; windows are cut from its front, best-quality first strip."""
 
-    def __init__(self, video, fps, seg, feats):
+    def __init__(self, video, fps, seg, feats, cuts_dir):
         self.video, self.fps, self.seg = video, fps, seg
+        self.cuts_dir = cuts_dir
         self.base = os.path.basename(video)
         a, b = int(seg['start'] * fps), int(seg['end'] * fps)
         sl = slice(a, b + 1)
@@ -107,6 +108,12 @@ class Candidate:
         self.jit_mean = float(np.nanmean(feats['jitter_burst'][sl]))
         self.cursor = a
         self.end = b
+        self.move = seg['base'].partition('+')[0]
+
+    @property
+    def order_key(self):
+        # video names embed the shooting timestamp: DJI_YYYYMMDDHHMMSS...
+        return (os.path.basename(self.video), self.seg['start'])
 
     def desired_dur(self):
         d = DUR_LOW + (DUR_HIGH - DUR_LOW) * self.rich
@@ -117,7 +124,8 @@ class Candidate:
         if self.end - self.cursor < dur * self.fps:
             return None
         w = dict(video=self.video, start=self.cursor / self.fps, end=(self.cursor + dur * self.fps) / self.fps,
-                 duration=dur, rich=self.rich, base=self.seg['base'], label=self.seg['label'], source=self.seg)
+                 duration=dur, rich=self.rich, base=self.seg['base'], label=self.seg['label'],
+                 source=self.seg, fps=self.fps)
         self.cursor += int(dur * self.fps) + int(0.3 * self.fps)   # small gap between windows
         return w
 
@@ -139,14 +147,14 @@ def make_candidates(dirs, variant='_v3'):
             feats, _ = seg.features(tel, flow, dj['fps'])
             for s in dj['segments']:
                 if s['duration'] >= DUR_MIN + 0.5:
-                    cands.append(Candidate(video, dj['fps'], s, feats))
+                    cands.append(Candidate(video, dj['fps'], s, feats, os.path.dirname(jp)))
     # calibrate richness against the candidate pool itself: percentile-scale to [0.15, 0.95]
     raw = sorted(c.rich for c in cands)
     for c in cands:
         rank = raw.index(c.rich) / max(1, len(raw) - 1)
         c.rich = 0.15 + 0.8 * rank
-        c.quality = c.rich * 2 + 0.3 - c.jit_mean / 100
-    cands.sort(key=lambda c: -c.quality)
+    # montage order = shooting order; quality only feeds the richness->duration map
+    cands.sort(key=lambda c: c.order_key)
     return cands
 
 def glob_jsons(d, variant='_v3'):
@@ -162,48 +170,61 @@ def csv_rows(path):
     with open(path) as fh:
         return list(csv.DictReader(fh))
 
-def plan(cands, bars, max_slots=200, max_per_video=4):
-    """Greedy: walk bar lines; each shot takes the bar-count whose length is closest to its
-    richness-desired duration. Cuts always land on bar lines."""
+MOVE_CLASS = dict(orbit='rotate', spiral='rotate', push='straight', pull='straight',
+                  truck='straight', diagonal='straight', vertical='other', static='other',
+                  pan='other', tilt='other')
+
+def plan(cands, bars, max_slots=200, max_per_video=2):
+    """Chronological montage: candidates are consumed in shooting order, so the edit follows the
+    day as it was flown. Two soft rules bend the order without violating it:
+    - rotate/straight interleave: if the next candidate repeats the previous shot's move CLASS
+      (rotation vs straight line vs other), look ahead for a different class; the skipped
+      candidate stays in line and surfaces later;
+    - scene coverage: one window per segment, at most max_per_video per flight, so as many distinct
+      scenes as possible appear."""
     timeline = []
     i = 0
-    prev_base = None
+    prev_class = None
     used = {}
     bar = bars[1] - bars[0] if len(bars) > 1 else 2.0
-    while i < len(bars) - 1 and len(timeline) < max_slots:
+    queue = list(cands)
+    while i < len(bars) - 1 and len(timeline) < max_slots and queue:
         t0 = bars[i]
         units = [u for u in BAR_UNITS if u * bar >= DUR_MIN and u * bar <= DUR_MAX
-                 and i + u * 4 <= len(bars) - 1]
-        chosen = None
-        for strict in (True, False):
-            for c in cands:
-                if strict and (c.base == prev_base or used.get(c.video, 0) >= max_per_video) \
-                        and len(cands) > 1:
-                    continue
-                want = c.desired_dur()
-                fit = [u for u in units if c.end - c.cursor >= u * bar * c.fps]
-                if not fit:
-                    continue
-                u = min(fit, key=lambda u: abs(u * bar - want))
-                chosen = (c, u)
-                break
-            if chosen:
-                break
-        if chosen is None:
+                 and i + u <= len(bars) - 1]
+        if not units:
             break
-        c, u = chosen
+        # next candidate in shooting order; if it repeats the previous move class, look ahead
+        # (bounded) for a different class; the deferred candidate surfaces later, chronology bends
+        # only within the lookahead depth
+        pick = None
+        viable = 0
+        for pos, c in enumerate(queue):
+            if used.get(c.video, 0) >= max_per_video:
+                continue
+            cls = MOVE_CLASS.get(c.move, 'other')
+            viable += 1
+            if pos == 0 or prev_class is None or cls != prev_class or viable >= 8:
+                pick = pos
+                break
+        if pick is None:                                   # everything left is capped
+            break
+        c = queue.pop(pick)
+        want = c.desired_dur()
+        fit = [u for u in units if c.end - c.cursor >= u * bar * c.fps]
+        if not fit:
+            continue
+        u = min(fit, key=lambda u: abs(u * bar - want))
         dur = u * bar
         w = c.take(dur)
         if w is None:
-            cands.remove(c); continue
-        w.update(slot=i, bar_unit=u, slot_start=t0, bar_s=bar)
+            continue
+        w.update(slot=i, bar_unit=u, slot_start=t0, bar_s=bar, seq=len(timeline) + 1,
+                 cuts_dir=c.cuts_dir, move=c.move)
         timeline.append(w)
         used[c.video] = used.get(c.video, 0) + 1
-        prev_base = c.base
-        i += u                                              # advance in bars, not beats
-        cands = [c for c in cands if c.end - c.cursor >= DUR_MIN * c.fps]
-        if not cands:
-            break
+        prev_class = MOVE_CLASS.get(c.move, 'other')
+        i += u
     return timeline
 
 def _venc():
@@ -235,6 +256,52 @@ def assemble(timeline, music_path, out_mp4, workdir):
                     '-af', f'afade=t=out:st={fade:.2f}:d=2.5', '-shortest', out_mp4], check=True)
     return out_mp4
 
+def gps_map(timeline, out_png):
+    """Flight tracks (grey) with the windows used in the draft overlaid in colour and numbered
+    by their position in the edit."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    tracks = {}                                        # cuts_dir -> (lat, lon)
+    for w in timeline:
+        key = w['cuts_dir']
+        if key not in tracks:
+            tel_p = os.path.join(key, os.path.splitext(os.path.basename(w['video']))[0] + '_telemetry.csv')
+            if not os.path.exists(tel_p):
+                tracks[key] = None
+                continue
+            rows = csv_rows(tel_p)
+            lat = np.array([float(r['lat']) for r in rows])
+            lon = np.array([float(r['lon']) for r in rows])
+            tracks[key] = (lat, lon)
+    lat0 = np.mean([np.mean(t[0]) for t in tracks.values() if t is not None])
+    kx = math.cos(math.radians(lat0))
+    fig, ax = plt.subplots(figsize=(12, 10))
+    cmap = plt.get_cmap('tab20')
+    for t in tracks.values():
+        if t is None: continue
+        lat, lon = t
+        ax.plot(lon[::8] * kx, lat[::8], color='0.75', lw=0.8, zorder=1)
+    for w in timeline:
+        t = tracks.get(w['cuts_dir'])
+        if t is None: continue
+        lat, lon = t
+        fps = w.get('fps', 59.94)
+        a, b = int(w['start'] * fps), int(w['end'] * fps)
+        a, b = max(0, a), min(len(lat) - 1, b)
+        if b <= a: continue
+        col = cmap(w['seq'] % 20)
+        ax.plot(lon[a:b:4] * kx, lat[a:b:4], color=col, lw=3, zorder=2)
+        ax.annotate(str(w['seq']), (np.mean(lon[a:b]) * kx, np.mean(lat[a:b])),
+                    fontsize=9, fontweight='bold', color=col, ha='center', va='center', zorder=3)
+    ax.set_aspect(1.0)
+    ax.set_title(f"{len(timeline)} shots used in draft (numbered) — grey: all flight tracks")
+    ax.set_xlabel('lon (scaled)'); ax.set_ylabel('lat')
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=130)
+    plt.close(fig)
+    return out_png
+
 def build(music_path, dirs, out_mp4, workdir=None):
     bars, bpm, dur = beat_grid(music_path)
     print(f'music: {bpm:.1f} BPM, {len(bars)} bars, {dur:.0f}s', file=sys.stderr)
@@ -242,12 +309,17 @@ def build(music_path, dirs, out_mp4, workdir=None):
     print(f'{len(cands)} candidate segments', file=sys.stderr)
     timeline = plan(cands, bars)
     total = sum(w['duration'] for w in timeline)
-    print(f'plan: {len(timeline)} shots, {total:.0f}s of video', file=sys.stderr)
+    vids = {w['video'] for w in timeline}
+    print(f'plan: {len(timeline)} shots, {total:.0f}s of video, {len(vids)} flights, order=shooting order', file=sys.stderr)
     workdir = workdir or tempfile.mkdtemp(prefix='dronesift_draft_')
     assemble(timeline, music_path, out_mp4, workdir)
     ej = os.path.splitext(out_mp4)[0] + '_edit.json'
     json.dump(dict(music=music_path, bpm=bpm, timeline=timeline,
                    total_s=total, shots=len(timeline)), open(ej, 'w'), indent=1, ensure_ascii=False)
+    try:
+        gps_map(timeline, os.path.splitext(out_mp4)[0] + '_gps.png')
+    except Exception as e:
+        print(f'gps map failed: {e}', file=sys.stderr)
     return out_mp4, timeline
 
 if __name__ == '__main__':
