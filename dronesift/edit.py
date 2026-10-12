@@ -96,10 +96,13 @@ def richness(f, sl, base):
                          + 0.15 * min(sharp / 0.6, 1), 0, 1))
 
 def load_track(path):
-    """Hiking track from a KML (gx:coord or <coordinates>), as (N, 2) lon/lat."""
+    """Hiking track from a KML as (pts Nx2 lon/lat, t seconds from start) — or (pts, None) if the
+    KML carries no <when> timestamps. t pairs with the coordinates; overlapping out-and-back
+    sections are disambiguated by matching the video CAPTURE time against the track time."""
     import re
+    from datetime import datetime
     text = open(path, encoding='utf-8', errors='replace').read()
-    pts = []
+    pts, whens = [], []
     for m in re.finditer(r'<gx:coord>([^<]+)</gx:coord>', text):
         v = m.group(1).split()
         if len(v) >= 2:
@@ -110,14 +113,47 @@ def load_track(path):
                 v = tup.split(',')
                 if len(v) >= 2:
                     pts.append((float(v[0]), float(v[1])))
-    return np.array(pts) if pts else None
+    for m in re.finditer(r'<when>([^<]+)</when>', text):
+        try:
+            whens.append(datetime.fromisoformat(m.group(1).strip().replace('Z', '+00:00')))
+        except ValueError:
+            pass
+    if not pts:
+        return None
+    pts = np.array(pts)
+    if len(whens) != len(pts):
+        return pts, None
+    # axis = seconds from the first track point; both this and 'video filename time minus hike
+    # start' share the same clock origin (the KML <name> is the local rendering of whens[0]),
+    # so no timezone arithmetic is needed anywhere
+    t = np.array([(w - whens[0]).total_seconds() for w in whens])
+    return pts, t
 
-def track_progress(track, lon, lat):
-    """Metres along the hiking track of the nearest point to (lon, lat) — the montage's
-    ordering key: as the hiker advances, the footage advances with them."""
-    d2 = (track[:, 0] - lon) ** 2 + (track[:, 1] - lat) ** 2
-    i = int(np.argmin(d2))
-    seg = np.diff(track, axis=0)
+def capture_time_s(video, t0_local):
+    """Seconds from the hike start for a DJI filename (DJI_YYYYMMDDHHMMSS...), or None."""
+    import re
+    from datetime import datetime
+    m = re.search(r'DJI_(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})', os.path.basename(video))
+    if not m:
+        return None
+    y, mo, d, h, mi, s = map(int, m.groups())
+    try:
+        dt = datetime(y, mo, d, h, mi, s)
+    except ValueError:
+        return None
+    return (dt - t0_local).total_seconds()
+
+def track_progress(track, lon, lat, capture_s=None):
+    """Metres along the hiking track for a shot. With a timed track and a capture time, pick the
+    track point closest IN TIME — this resolves out-and-back overlaps where the descent retraces
+    the ascent (nearest-space alone would place afternoon footage at morning positions)."""
+    pts, t = track if isinstance(track, tuple) else (track, None)
+    if t is not None and capture_s is not None:
+        i = int(np.argmin(np.abs(t - capture_s)))
+    else:
+        d2 = (pts[:, 0] - lon) ** 2 + (pts[:, 1] - lat) ** 2
+        i = int(np.argmin(d2))
+    seg = np.diff(pts, axis=0)
     return float(np.hypot(seg[:, 0], seg[:, 1])[:i].sum())
 
 class Candidate:
@@ -156,7 +192,7 @@ class Candidate:
 
 # ---------------------------------------------------------------- assembly
 
-def make_candidates(dirs, variant='_v3', track=None):
+def make_candidates(dirs, variant='_v3', track=None, track_path=None):
     from . import segment as seg
     cands = []
     for d in dirs:
@@ -183,14 +219,26 @@ def make_candidates(dirs, variant='_v3', track=None):
     for c in cands:
         rank = raw.index(c.rich) / max(1, len(raw) - 1)
         c.rich = 0.15 + 0.8 * rank
-    # montage order: progress along the hiking track when given, else shooting time
-    if track is not None and len(track):
-        for c in cands:
-            c.s = track_progress(track, c.mlon, c.mlat)
-        cands.sort(key=lambda c: (c.s, c.order_key))
-    else:
-        cands.sort(key=lambda c: c.order_key)
+    # montage order = capture time (filename clock). For out-and-back trails the track's spatial
+    # order is ambiguous (the descent retraces the ascent), and time IS the narrative order:
+    # ascend in the morning, descend in the afternoon. The track is used for the GPS map only.
+    cands.sort(key=lambda c: c.order_key)
     return cands
+
+def _t0_local(track_path):
+    """Hike start as a local naive datetime, parsed from the KML <name> ('2026-10-01 09:14:06')."""
+    import re
+    from datetime import datetime
+    if not track_path:
+        return None
+    text = open(track_path, encoding='utf-8', errors='replace').read()
+    nm = re.search(r'<name>([^<]+)</name>', text)
+    if not nm:
+        return None
+    try:
+        return datetime.fromisoformat(nm.group(1).strip())
+    except ValueError:
+        return None
 
 def glob_jsons(d, variant='_v3'):
     import glob
@@ -211,11 +259,18 @@ MOVE_CLASS = dict(orbit='rotate', spiral='rotate', push='straight', pull='straig
                   truck='straight', diagonal='straight', vertical='other', static='other',
                   pan='other', tilt='other')
 
-def plan(cands, bars, max_slots=200, max_per_flight=2):
+def max_per_flight(n_flights, music_dur, bars):
+    """Windows per flight so the song is filled with as many distinct scenes as possible."""
+    bar = bars[1] - bars[0] if len(bars) > 1 else 2.0
+    need = max(1, int(music_dur / (2 * bar)))              # ~2-bar average shot
+    return max(1, min(3, math.ceil(need / max(1, n_flights))))
+
+def plan(cands, bars, max_slots=200, max_per_flight=2, music_end=None):
     """Location-block montage following the hiking track: candidates arrive sorted by progress
     along the track, flights become contiguous blocks (A-A-B-B, no interleaving), each flight
     donates up to max_per_flight windows and, inside a block, move classes alternate when the
-    flight offers both rotation and straight moves."""
+    flight offers both rotation and straight moves. music_end caps the timeline so the silent
+    tail after the song never exceeds ~1 s."""
     timeline = []
     i = 0
     bar = bars[1] - bars[0] if len(bars) > 1 else 2.0
@@ -244,7 +299,8 @@ def plan(cands, bars, max_slots=200, max_per_flight=2):
                 if placed >= max_per_flight or i >= len(bars) - 1 or len(timeline) >= max_slots:
                     break
                 units = [u for u in BAR_UNITS if u * bar >= DUR_MIN and u * bar <= DUR_MAX
-                         and i + u <= len(bars) - 1]
+                         and i + u <= len(bars) - 1
+                         and (music_end is None or bars[i] + u * bar <= music_end + 1.0)]
                 fit = [u for u in units if c.end - c.cursor >= u * bar * c.fps]
                 if not fit:
                     continue
@@ -347,21 +403,21 @@ def build(music_path, dirs, out_mp4, workdir=None, track_path=None):
     print(f'music: {bpm:.1f} BPM, {len(bars)} bars, {dur:.0f}s', file=sys.stderr)
     track = load_track(track_path) if track_path else None
     if track is not None:
-        print(f'hike track: {len(track)} points — montage follows track progress', file=sys.stderr)
-    cands = make_candidates(dirs, track=track)
+        print(f'hike track: {len(track[0])} points, timed={track[1] is not None} — montage follows track progress', file=sys.stderr)
+    cands = make_candidates(dirs, track=track, track_path=track_path)
     print(f'{len(cands)} candidate segments (from _cuts_v3)', file=sys.stderr)
-    timeline = plan(cands, bars)
+    timeline = plan(cands, bars, music_end=dur, max_per_flight=max_per_flight(len(cands), dur, bars))
     total = sum(w['duration'] for w in timeline)
     vids = {w['video'] for w in timeline}
-    order = 'hike track progress' if track is not None else 'shooting order'
-    print(f'plan: {len(timeline)} shots, {total:.0f}s of video, {len(vids)} flights, order={order}', file=sys.stderr)
+    order = 'shooting order (track drawn on the GPS map)'
+    print(f'plan: {len(timeline)} shots, {total:.0f}s of video (music {dur:.0f}s), {len(vids)} flights, order={order}', file=sys.stderr)
     workdir = workdir or tempfile.mkdtemp(prefix='dronesift_draft_')
     assemble(timeline, music_path, out_mp4, workdir)
     ej = os.path.splitext(out_mp4)[0] + '_edit.json'
     json.dump(dict(music=music_path, bpm=bpm, timeline=timeline,
                    total_s=total, shots=len(timeline)), open(ej, 'w'), indent=1, ensure_ascii=False)
     try:
-        gps_map(timeline, os.path.splitext(out_mp4)[0] + '_gps.png', track)
+        gps_map(timeline, os.path.splitext(out_mp4)[0] + '_gps.png', track[0] if track else None)
     except Exception as e:
         print(f'gps map failed: {e}', file=sys.stderr)
     return out_mp4, timeline
