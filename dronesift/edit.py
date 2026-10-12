@@ -215,6 +215,8 @@ class Candidate:
 # ---------------------------------------------------------------- assembly
 
 def make_candidates(dirs, variant='_v3', track=None, track_path=None, dedup_r=60.0):
+    """Returns (selected, all): `all` is every stable segment in narrative order — drawn on the
+    GPS map; `selected` is the deduped, slot-length-capable subset used for planning."""
     from . import segment as seg
     cands = []
     for d in dirs:
@@ -232,10 +234,11 @@ def make_candidates(dirs, variant='_v3', track=None, track_path=None, dedup_r=60
             lon = np.array([float(r['lon']) for r in tel])
             mlon, mlat = float(np.mean(lon)), float(np.mean(lat))
             for s in dj['segments']:
-                if s['duration'] >= DUR_MIN + 0.5:
-                    c = Candidate(video, dj['fps'], s, feats, os.path.dirname(jp))
-                    c.mlon, c.mlat = mlon, mlat
-                    cands.append(c)
+                c = Candidate(video, dj['fps'], s, feats, os.path.dirname(jp))
+                c.mlon, c.mlat = mlon, mlat
+                cands.append(c)
+    if not cands:
+        return [], []
     # calibrate richness against the candidate pool itself: percentile-scale to [0.15, 0.95]
     raw = sorted(c.rich for c in cands)
     for c in cands:
@@ -243,38 +246,32 @@ def make_candidates(dirs, variant='_v3', track=None, track_path=None, dedup_r=60
         c.rich = 0.15 + 0.8 * rank
     # montage order = narrative order along the hike: pass 0 (outbound, by track position
     # ascending), then pass 1 (inbound, descending). Within a pass the track position corrects
-    # flights that were flown out of walking sequence. Nearby same-subject flights are deduped.
+    # flights that were flown out of walking sequence. Nearby same-subject flights are deduped
+    # from PLANNING only — the map still shows every segment.
     if track is not None and track[1] is not None:
         pts, t, s_axis = track
         t0_local = _t0_local(track_path)
-        kept = []
-        for c in sorted(cands, key=lambda c: c.order_key):
+        for c in cands:
             cap = capture_time_s(c.video, t0_local) if t0_local else None
             c.s, c.pass_id = track_progress(pts, t, s_axis, cap, c.mlon, c.mlat)
-            dup = False
-            for k in kept:
-                if abs(k.pass_id - c.pass_id) == 0 and _dist_m(k.mlon, k.mlat, c.mlon, c.mlat) < dedup_r:
-                    dup = True
-                    break
-            if dup:
-                print(f'dedup (same spot as an earlier flight): {os.path.basename(c.video)}', file=sys.stderr)
-                continue
-            kept.append(c)
-        cands = kept
         sgn = np.where(np.array([c.pass_id for c in cands]) == 0, 1, -1)
         # bucket track position at 100 m: inside a bucket the trail projection cannot resolve
         # a few metres of GPS noise, so capture time decides; across buckets position wins
         cands.sort(key=lambda c: (c.pass_id, sgn[c.pass_id] * round(c.s / 100.0), c.order_key))
     else:
-        # no timed track: dedup by position still applies, ordered by capture time
-        kept = []
-        for c in sorted(cands, key=lambda c: c.order_key):
-            if any(_dist_m(k.mlon, k.mlat, c.mlon, c.mlat) < dedup_r for k in kept):
-                print(f'dedup (same spot as an earlier flight): {os.path.basename(c.video)}', file=sys.stderr)
-                continue
-            kept.append(c)
-        cands = kept
-    return cands
+        cands.sort(key=lambda c: c.order_key)
+    for c in cands:
+        c.pass_id = getattr(c, 'pass_id', 0)
+    selected = []
+    for c in cands:
+        if c.seg['duration'] < DUR_MIN + 0.5:
+            continue
+        if any(k.pass_id == c.pass_id and _dist_m(k.mlon, k.mlat, c.mlon, c.mlat) < dedup_r
+               for k in selected):
+            print(f'dedup (same spot as an earlier flight): {os.path.basename(c.video)}', file=sys.stderr)
+            continue
+        selected.append(c)
+    return selected, cands
 
 def _dist_m(lon1, lat1, lon2, lat2):
     import math
@@ -408,7 +405,18 @@ def gps_map(timeline, cands, out_png, track=None):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
+    import matplotlib.patheffects as pe
+    from matplotlib import font_manager
     from matplotlib.lines import Line2D
+    for fname in ('PingFang SC', 'Hiragino Sans GB', 'Arial Unicode MS', 'STHeiti',
+                  'Microsoft YaHei', 'Noto Sans CJK SC'):
+        try:
+            if font_manager.findfont(fname, fallback_to_default=False):
+                plt.rcParams['font.sans-serif'] = [fname]
+                break
+        except Exception:
+            continue
+    plt.rcParams['axes.unicode_minus'] = False
     tracks = {}                                        # cuts_dir -> (lat, lon)
 
     def get_track(cuts_dir, video):
@@ -453,7 +461,8 @@ def gps_map(timeline, cands, out_png, track=None):
                     arrowprops=dict(arrowstyle='-|>', color='crimson', lw=2,
                                     mutation_scale=22, connectionstyle=conn))
         ax.annotate(str(w['seq']), (lon[(a + b) // 2] * kx, lat[(a + b) // 2]), zorder=6,
-                    fontsize=11, fontweight='bold', color='crimson', ha='center', va='center')
+                    fontsize=14, fontweight='bold', color='crimson', ha='center', va='center',
+                    path_effects=[pe.withStroke(linewidth=4, foreground='white')])
     handles = [Line2D([], [], color=c, lw=2.5, label=l) for l, c in
                (('旋转 orbit/spiral', CLASS_COLOR['rotate']), ('直线 push/pull/truck', CLASS_COLOR['straight']),
                 ('其他 升降/悬停/摇', CLASS_COLOR['other']))]
@@ -475,8 +484,8 @@ def build(music_path, dirs, out_mp4, workdir=None, track_path=None):
     track = load_track(track_path) if track_path else None
     if track is not None:
         print(f'hike track: {len(track[0])} points — drawn on the GPS map', file=sys.stderr)
-    cands = make_candidates(dirs, track=track, track_path=track_path)
-    print(f'{len(cands)} candidate segments (from _cuts_v3)', file=sys.stderr)
+    cands, cands_all = make_candidates(dirs, track=track, track_path=track_path)
+    print(f'{len(cands)} planning candidates, {len(cands_all)} stable segments on the map (from _cuts_v3)', file=sys.stderr)
     slots = music_slots(bars, dur)
     print(f'music slots: {len(slots)} ({", ".join(f"{d:.1f}s" for _, d in slots)})', file=sys.stderr)
     timeline = plan_slots(cands, slots)
@@ -489,7 +498,7 @@ def build(music_path, dirs, out_mp4, workdir=None, track_path=None):
     json.dump(dict(music=music_path, bpm=bpm, slots=slots, timeline=timeline,
                    total_s=total, shots=len(timeline)), open(ej, 'w'), indent=1, ensure_ascii=False)
     try:
-        gps_map(timeline, cands, os.path.splitext(out_mp4)[0] + '_gps.png', track[0] if track else None)
+        gps_map(timeline, cands_all, os.path.splitext(out_mp4)[0] + '_gps.png', track[0] if track else None)
     except Exception as e:
         print(f'gps map failed: {e}', file=sys.stderr)
     return out_mp4, timeline
