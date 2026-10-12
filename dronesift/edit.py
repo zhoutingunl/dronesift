@@ -133,6 +133,15 @@ def load_track(path):
     s = np.concatenate(([0.0], np.cumsum(np.hypot(seg[:, 0], seg[:, 1]))))
     return pts, t, s
 
+def _bearing_deg(lon1, lat1, lon2, lat2):
+    """Compass bearing of (lon1,lat1) -> (lon2,lat2), degrees 0..360 (0 = north)."""
+    import math
+    dx = (lon2 - lon1) * math.cos(math.radians(lat1))
+    dy = lat2 - lat1
+    if dx == 0 and dy == 0:
+        return None
+    return (math.degrees(math.atan2(dx, dy)) + 360) % 360
+
 def capture_time_s(video, t0_local):
     """Seconds from the hike start for a DJI filename (DJI_YYYYMMDDHHMMSS...), or None."""
     import re
@@ -148,18 +157,19 @@ def capture_time_s(video, t0_local):
     return (dt - t0_local).total_seconds()
 
 def track_progress(pts, t, s_axis, capture_s=None, lon=None, lat=None):
-    """(arc position s in metres, pass index) for a shot. With a timed track and a capture time,
-    the matching track point is the one closest IN TIME; pass 0 = outbound (before the turnaround,
-    order by s ascending), pass 1 = inbound (order by s descending). Without timing: nearest space,
-    always pass 0. The arc position is refined onto the neighbouring polyline segments, so shots a
-    few metres apart order correctly."""
+    """(arc position s in metres, pass index, matched track index) for a shot. With a timed track
+    and a capture time, the matching track point is the one closest IN TIME; pass 0 = outbound
+    (before the turnaround, order by s ascending), pass 1 = inbound (order by s descending).
+    Without timing: nearest space, always pass 0. The arc position is refined onto the
+    neighbouring polyline segments, so shots a few metres apart order correctly."""
     import math
+    i = None
     if t is not None and capture_s is not None:
         i = int(np.argmin(np.abs(t - capture_s)))
     elif lon is not None:
         i = int(np.argmin((pts[:, 0] - lon) ** 2 + (pts[:, 1] - lat) ** 2))
     else:
-        return 0.0, 0
+        return 0.0, 0, None
     scale = np.array([111320.0 * math.cos(math.radians(pts[:, 1].mean())), 111320.0])
     q = np.array([lon, lat]) * scale if lon is not None else pts[i] * scale
     p = pts * scale
@@ -175,7 +185,7 @@ def track_progress(pts, t, s_axis, capture_s=None, lon=None, lat=None):
             if dist < best[0]:
                 best = (dist, float(s_axis[j] + tt * math.sqrt(L2)))
     turn = int(np.argmax(s_axis))
-    return best[1], (0 if i <= turn or s_axis[turn] == 0 else 1)
+    return best[1], (0 if i <= turn or s_axis[turn] == 0 else 1), i
 
 class Candidate:
     """One segment that can donate windows; windows are cut from its front, best-quality first strip."""
@@ -236,6 +246,10 @@ def make_candidates(dirs, variant='_v3', track=None, track_path=None, dedup_r=60
             for s in dj['segments']:
                 c = Candidate(video, dj['fps'], s, feats, os.path.dirname(jp))
                 c.mlon, c.mlat = mlon, mlat
+                if len(lat) > 1:
+                    c.shot_bear = _bearing_deg(lon[c.a], lat[c.a], lon[min(c.b, len(lat) - 1)], lat[min(c.b, len(lat) - 1)])
+                else:
+                    c.shot_bear = None
                 cands.append(c)
     if not cands:
         return [], []
@@ -253,7 +267,17 @@ def make_candidates(dirs, variant='_v3', track=None, track_path=None, dedup_r=60
         t0_local = _t0_local(track_path)
         for c in cands:
             cap = capture_time_s(c.video, t0_local) if t0_local else None
-            c.s, c.pass_id = track_progress(pts, t, s_axis, cap, c.mlon, c.mlat)
+            c.s, c.pass_id, i_match = track_progress(pts, t, s_axis, cap, c.mlon, c.mlat)
+            # straight moves read best when the camera travels the same way the hiker walks
+            hb = None
+            if i_match is not None:
+                j1, j2 = max(0, i_match - 2), min(len(pts) - 1, i_match + 2)
+                hb = _bearing_deg(pts[j1][0], pts[j1][1], pts[j2][0], pts[j2][1])
+            if MOVE_CLASS.get(c.move) == 'straight' and c.shot_bear is not None and hb is not None:
+                d = (hb - c.shot_bear) % 360.0
+                c.dir_aligned = (d < 90 or d > 270)
+            else:
+                c.dir_aligned = None
         sgn = np.where(np.array([c.pass_id for c in cands]) == 0, 1, -1)
         # bucket track position at 100 m: inside a bucket the trail projection cannot resolve
         # a few metres of GPS noise, so capture time decides; across buckets position wins
@@ -262,6 +286,7 @@ def make_candidates(dirs, variant='_v3', track=None, track_path=None, dedup_r=60
         cands.sort(key=lambda c: c.order_key)
     for c in cands:
         c.pass_id = getattr(c, 'pass_id', 0)
+        c.dir_aligned = getattr(c, 'dir_aligned', None)
     selected = []
     for c in cands:
         if c.seg['duration'] < DUR_MIN + 0.5:
@@ -362,7 +387,10 @@ def plan_slots(cands, slots, max_per_flight=2):
         if w is None:
             queue.pop(pick)                            # exhausted: drop and retry this slot
             continue
-        w.update(slot=si, slot_start=t0, seq=len(timeline) + 1, cuts_dir=c.cuts_dir, move=c.move)
+        # anti-hike-direction straight shots are played backwards (a reversed push reads as a
+        # pull) so the montage keeps strict narrative order AND matches the walking direction
+        w.update(slot=si, slot_start=t0, seq=len(timeline) + 1, cuts_dir=c.cuts_dir, move=c.move,
+                 reversed=bool(c.dir_aligned is False))
         used[c.video] = used.get(c.video, 0) + 1
         timeline.append(w)
     return timeline
@@ -381,6 +409,11 @@ def assemble(timeline, music_path, out_mp4, workdir):
         subprocess.run(['ffmpeg', '-v', 'error', '-y', '-ss', f"{w['start']:.3f}", '-to', f"{w['end']:.3f}",
                         '-i', w['video'], '-vf', f'scale={W}:{H},fps={FPS},format=yuv420p',
                         '-an'] + _venc() + [part], check=True)
+        if w.get('reversed'):                          # anti-hike-direction: play backwards
+            rev = part + '.rev.mp4'
+            subprocess.run(['ffmpeg', '-v', 'error', '-y', '-i', part, '-vf', 'reverse'] + _venc() + [rev], check=True)
+            os.remove(part); os.rename(rev, part)
+            print(f"      (reversed)", file=sys.stderr)
         parts.append(part)
         print(f"  [{k + 1}/{len(timeline)}] {os.path.basename(w['video'])} {w['start']:7.2f}-{w['end']:7.2f}s", file=sys.stderr)
     lst = os.path.join(workdir, 'concat.txt')
@@ -454,6 +487,8 @@ def gps_map(timeline, cands, out_png, track=None):
         if b <= a: continue
         ax.plot(lon[a:b] * kx, lat[a:b], color='crimson', lw=4, zorder=4)
         i1, i2 = a + (b - a) // 4, a + 3 * (b - a) // 4
+        if w.get('reversed'):
+            i1, i2 = i2, i1                            # arrow shows the playback direction
         x1, y1 = lon[i1] * kx, lat[i1]
         x2, y2 = lon[i2] * kx, lat[i2]
         conn = 'arc3,rad=0.4' if MOVE_CLASS.get(w['move']) == 'rotate' else 'arc3,rad=0'
