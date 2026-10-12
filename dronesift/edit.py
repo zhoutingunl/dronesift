@@ -95,6 +95,31 @@ def richness(f, sl, base):
     return float(np.clip(0.4 * prior + 0.3 * min(tracks / 400, 1) + 0.15 * min(mvar, 0.6) / 0.6
                          + 0.15 * min(sharp / 0.6, 1), 0, 1))
 
+def load_track(path):
+    """Hiking track from a KML (gx:coord or <coordinates>), as (N, 2) lon/lat."""
+    import re
+    text = open(path, encoding='utf-8', errors='replace').read()
+    pts = []
+    for m in re.finditer(r'<gx:coord>([^<]+)</gx:coord>', text):
+        v = m.group(1).split()
+        if len(v) >= 2:
+            pts.append((float(v[0]), float(v[1])))
+    if not pts:
+        for m in re.finditer(r'<coordinates>([^<]+)</coordinates>', text):
+            for tup in m.group(1).split():
+                v = tup.split(',')
+                if len(v) >= 2:
+                    pts.append((float(v[0]), float(v[1])))
+    return np.array(pts) if pts else None
+
+def track_progress(track, lon, lat):
+    """Metres along the hiking track of the nearest point to (lon, lat) — the montage's
+    ordering key: as the hiker advances, the footage advances with them."""
+    d2 = (track[:, 0] - lon) ** 2 + (track[:, 1] - lat) ** 2
+    i = int(np.argmin(d2))
+    seg = np.diff(track, axis=0)
+    return float(np.hypot(seg[:, 0], seg[:, 1])[:i].sum())
+
 class Candidate:
     """One segment that can donate windows; windows are cut from its front, best-quality first strip."""
 
@@ -131,7 +156,7 @@ class Candidate:
 
 # ---------------------------------------------------------------- assembly
 
-def make_candidates(dirs, variant='_v3'):
+def make_candidates(dirs, variant='_v3', track=None):
     from . import segment as seg
     cands = []
     for d in dirs:
@@ -145,21 +170,33 @@ def make_candidates(dirs, variant='_v3'):
                 print(f'skip (no caches): {jp}', file=sys.stderr); continue
             tel = list(csv_rows(tel_p)); flow = list(csv_rows(flow_p))
             feats, _ = seg.features(tel, flow, dj['fps'])
+            lat = np.array([float(r['lat']) for r in tel])
+            lon = np.array([float(r['lon']) for r in tel])
+            mlon, mlat = float(np.mean(lon)), float(np.mean(lat))
             for s in dj['segments']:
                 if s['duration'] >= DUR_MIN + 0.5:
-                    cands.append(Candidate(video, dj['fps'], s, feats, os.path.dirname(jp)))
+                    c = Candidate(video, dj['fps'], s, feats, os.path.dirname(jp))
+                    c.mlon, c.mlat = mlon, mlat
+                    cands.append(c)
     # calibrate richness against the candidate pool itself: percentile-scale to [0.15, 0.95]
     raw = sorted(c.rich for c in cands)
     for c in cands:
         rank = raw.index(c.rich) / max(1, len(raw) - 1)
         c.rich = 0.15 + 0.8 * rank
-    # montage order = shooting order; quality only feeds the richness->duration map
-    cands.sort(key=lambda c: c.order_key)
+    # montage order: progress along the hiking track when given, else shooting time
+    if track is not None and len(track):
+        for c in cands:
+            c.s = track_progress(track, c.mlon, c.mlat)
+        cands.sort(key=lambda c: (c.s, c.order_key))
+    else:
+        cands.sort(key=lambda c: c.order_key)
     return cands
 
 def glob_jsons(d, variant='_v3'):
     import glob
-    for suffix in (variant, ''):
+    if variant:                                        # explicit variant: no silent fallback
+        return sorted(glob.glob(os.path.join(d, f'*_cuts{variant}', '*_segments.json')))
+    for suffix in ('_v3', ''):
         out = sorted(glob.glob(os.path.join(d, f'*_cuts{suffix}', '*_segments.json')))
         if out:
             return out
@@ -174,57 +211,56 @@ MOVE_CLASS = dict(orbit='rotate', spiral='rotate', push='straight', pull='straig
                   truck='straight', diagonal='straight', vertical='other', static='other',
                   pan='other', tilt='other')
 
-def plan(cands, bars, max_slots=200, max_per_video=2):
-    """Chronological montage: candidates are consumed in shooting order, so the edit follows the
-    day as it was flown. Two soft rules bend the order without violating it:
-    - rotate/straight interleave: if the next candidate repeats the previous shot's move CLASS
-      (rotation vs straight line vs other), look ahead for a different class; the skipped
-      candidate stays in line and surfaces later;
-    - scene coverage: one window per segment, at most max_per_video per flight, so as many distinct
-      scenes as possible appear."""
+def plan(cands, bars, max_slots=200, max_per_flight=2):
+    """Location-block montage following the hiking track: candidates arrive sorted by progress
+    along the track, flights become contiguous blocks (A-A-B-B, no interleaving), each flight
+    donates up to max_per_flight windows and, inside a block, move classes alternate when the
+    flight offers both rotation and straight moves."""
     timeline = []
     i = 0
-    prev_class = None
-    used = {}
     bar = bars[1] - bars[0] if len(bars) > 1 else 2.0
-    queue = list(cands)
-    while i < len(bars) - 1 and len(timeline) < max_slots and queue:
-        t0 = bars[i]
-        units = [u for u in BAR_UNITS if u * bar >= DUR_MIN and u * bar <= DUR_MAX
-                 and i + u <= len(bars) - 1]
-        if not units:
-            break
-        # next candidate in shooting order; if it repeats the previous move class, look ahead
-        # (bounded) for a different class; the deferred candidate surfaces later, chronology bends
-        # only within the lookahead depth
-        pick = None
-        viable = 0
-        for pos, c in enumerate(queue):
-            if used.get(c.video, 0) >= max_per_video:
-                continue
-            cls = MOVE_CLASS.get(c.move, 'other')
-            viable += 1
-            if pos == 0 or prev_class is None or cls != prev_class or viable >= 8:
-                pick = pos
+    blocks = {}
+    for c in cands:
+        blocks.setdefault(c.video, []).append(c)
+
+    def alternate(segs):
+        """Order a flight's segments so consecutive move classes differ when possible."""
+        out, last = [], None
+        pool = list(segs)
+        while pool:
+            pick = next((c for c in pool if MOVE_CLASS.get(c.move) != last), pool[0])
+            out.append(pool.pop(pool.index(pick)))
+            last = MOVE_CLASS.get(out[-1].move)
+        return out
+
+    for pass_no in range(2):                           # pass 2 allows a 3rd window if music remains
+        for video, segs in blocks.items():
+            if pass_no == 0:
+                segs = alternate(sorted(segs, key=lambda c: c.seg['start']))
+            else:
+                segs = sorted(segs, key=lambda c: c.seg['start'])
+            placed = 0
+            for c in segs:
+                if placed >= max_per_flight or i >= len(bars) - 1 or len(timeline) >= max_slots:
+                    break
+                units = [u for u in BAR_UNITS if u * bar >= DUR_MIN and u * bar <= DUR_MAX
+                         and i + u <= len(bars) - 1]
+                fit = [u for u in units if c.end - c.cursor >= u * bar * c.fps]
+                if not fit:
+                    continue
+                u = min(fit, key=lambda u: abs(u * bar - c.desired_dur()))
+                w = c.take(u * bar)
+                if w is None:
+                    continue
+                w.update(slot=i, bar_unit=u, slot_start=bars[i], bar_s=bar, seq=len(timeline) + 1,
+                         cuts_dir=c.cuts_dir, move=c.move)
+                timeline.append(w)
+                placed += 1
+                i += u
+            if i >= len(bars) - 1:
                 break
-        if pick is None:                                   # everything left is capped
+        if i >= len(bars) - 1 or not any(c.end - c.cursor >= DUR_MIN * c.fps for c in cands):
             break
-        c = queue.pop(pick)
-        want = c.desired_dur()
-        fit = [u for u in units if c.end - c.cursor >= u * bar * c.fps]
-        if not fit:
-            continue
-        u = min(fit, key=lambda u: abs(u * bar - want))
-        dur = u * bar
-        w = c.take(dur)
-        if w is None:
-            continue
-        w.update(slot=i, bar_unit=u, slot_start=t0, bar_s=bar, seq=len(timeline) + 1,
-                 cuts_dir=c.cuts_dir, move=c.move)
-        timeline.append(w)
-        used[c.video] = used.get(c.video, 0) + 1
-        prev_class = MOVE_CLASS.get(c.move, 'other')
-        i += u
     return timeline
 
 def _venc():
@@ -256,9 +292,9 @@ def assemble(timeline, music_path, out_mp4, workdir):
                     '-af', f'afade=t=out:st={fade:.2f}:d=2.5', '-shortest', out_mp4], check=True)
     return out_mp4
 
-def gps_map(timeline, out_png):
+def gps_map(timeline, out_png, track=None):
     """Flight tracks (grey) with the windows used in the draft overlaid in colour and numbered
-    by their position in the edit."""
+    by their position in the edit; the hiking track, if given, is the dashed blue line."""
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -278,6 +314,8 @@ def gps_map(timeline, out_png):
     kx = math.cos(math.radians(lat0))
     fig, ax = plt.subplots(figsize=(12, 10))
     cmap = plt.get_cmap('tab20')
+    if track is not None and len(track):
+        ax.plot(track[:, 0] * kx, track[:, 1], '--', color='tab:blue', lw=2.2, zorder=2, label='hike track')
     for t in tracks.values():
         if t is None: continue
         lat, lon = t
@@ -295,29 +333,35 @@ def gps_map(timeline, out_png):
         ax.annotate(str(w['seq']), (np.mean(lon[a:b]) * kx, np.mean(lat[a:b])),
                     fontsize=9, fontweight='bold', color=col, ha='center', va='center', zorder=3)
     ax.set_aspect(1.0)
-    ax.set_title(f"{len(timeline)} shots used in draft (numbered) — grey: all flight tracks")
+    ax.set_title(f"{len(timeline)} shots used in draft (numbered) — grey: flights, dashed: hike track")
     ax.set_xlabel('lon (scaled)'); ax.set_ylabel('lat')
+    if track is not None and len(track):
+        ax.legend(loc='best')
     fig.tight_layout()
     fig.savefig(out_png, dpi=130)
     plt.close(fig)
     return out_png
 
-def build(music_path, dirs, out_mp4, workdir=None):
+def build(music_path, dirs, out_mp4, workdir=None, track_path=None):
     bars, bpm, dur = beat_grid(music_path)
     print(f'music: {bpm:.1f} BPM, {len(bars)} bars, {dur:.0f}s', file=sys.stderr)
-    cands = make_candidates(dirs)
-    print(f'{len(cands)} candidate segments', file=sys.stderr)
+    track = load_track(track_path) if track_path else None
+    if track is not None:
+        print(f'hike track: {len(track)} points — montage follows track progress', file=sys.stderr)
+    cands = make_candidates(dirs, track=track)
+    print(f'{len(cands)} candidate segments (from _cuts_v3)', file=sys.stderr)
     timeline = plan(cands, bars)
     total = sum(w['duration'] for w in timeline)
     vids = {w['video'] for w in timeline}
-    print(f'plan: {len(timeline)} shots, {total:.0f}s of video, {len(vids)} flights, order=shooting order', file=sys.stderr)
+    order = 'hike track progress' if track is not None else 'shooting order'
+    print(f'plan: {len(timeline)} shots, {total:.0f}s of video, {len(vids)} flights, order={order}', file=sys.stderr)
     workdir = workdir or tempfile.mkdtemp(prefix='dronesift_draft_')
     assemble(timeline, music_path, out_mp4, workdir)
     ej = os.path.splitext(out_mp4)[0] + '_edit.json'
     json.dump(dict(music=music_path, bpm=bpm, timeline=timeline,
                    total_s=total, shots=len(timeline)), open(ej, 'w'), indent=1, ensure_ascii=False)
     try:
-        gps_map(timeline, os.path.splitext(out_mp4)[0] + '_gps.png')
+        gps_map(timeline, os.path.splitext(out_mp4)[0] + '_gps.png', track)
     except Exception as e:
         print(f'gps map failed: {e}', file=sys.stderr)
     return out_mp4, timeline
@@ -328,6 +372,7 @@ if __name__ == '__main__':
     ap.add_argument('music'); ap.add_argument('dirs', nargs='+')
     ap.add_argument('-o', default='draft.mp4')
     ap.add_argument('--workdir', default=None)
+    ap.add_argument('--track', default=None, help='KML hiking track: order scenes by track progress')
     a = ap.parse_args()
-    out, tl = build(a.music, a.dirs, a.o, a.workdir)
+    out, tl = build(a.music, a.dirs, a.o, a.workdir, a.track)
     print(out)
