@@ -19,6 +19,7 @@ from scipy.ndimage import gaussian_filter1d, uniform_filter1d
 
 FPS = 30.0
 H, W = 1080, 1920
+PORTRAIT_W, PORTRAIT_H = 1080, 1920
 BAR_UNITS = (1, 2, 4)          # candidate slot lengths in bars
 DUR_MIN, DUR_MAX = 2.5, 10.0   # hard clamps on shot length, s
 DUR_LOW, DUR_HIGH = 3.0, 9.0   # richness maps into this range
@@ -419,14 +420,80 @@ def _venc():
     return (['-c:v', 'h264_videotoolbox', '-b:v', '12M'] if platform.system() == 'Darwin'
             else ['-c:v', 'libx264', '-preset', 'fast', '-crf', '20'])
 
-def assemble(timeline, music_path, out_mp4, workdir):
-    """Cut every window exactly (re-encoded to uniform 1080p30), concat, mix music with fade-out."""
+def _probe_dims(video):
+    out = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                          '-show_entries', 'stream=width,height', '-of', 'csv=p=0', video],
+                         capture_output=True, text=True).stdout.strip()
+    w, h = (int(v) for v in out.split(',')[:2])
+    return w, h
+
+def crop_centers(video, start, end, crop_w, analysis_w=160):
+    """Per-frame horizontal crop-centre (source px) for one window, following motion energy.
+
+    The window is decoded tiny (grayscale); each frame's column-wise |frame diff| profile gives a
+    horizontal attention centroid, which is carried forward through static frames, exponentially
+    smoothed (~0.6 s) and velocity-limited so the virtual camera pans, never whips."""
+    step = max(1, int(round(160 * 9 / 16)))            # keep 16:9 for the analysis decode
+    analysis_h = 90
+    cmd = ['ffmpeg', '-v', 'error', '-ss', f'{start:.3f}', '-to', f'{end:.3f}', '-i', video,
+           '-vf', f'scale={analysis_w}:{analysis_h}', '-pix_fmt', 'gray', '-f', 'rawvideo', '-']
+    buf = subprocess.run(cmd, capture_output=True).stdout
+    npx = analysis_w * analysis_h
+    frames = [np.frombuffer(buf[i:i + npx], np.uint8).reshape(analysis_h, analysis_w).astype(np.float32)
+              for i in range(0, len(buf) - npx + 1, npx)]
+    if not frames:
+        return None
+    src_w = _probe_dims(video)[0]
+    scale = src_w / analysis_w
+    centers, prev, prev_c = [], None, None
+    for fr in frames:
+        if prev is not None:
+            prof = np.abs(fr - prev).mean(axis=0)
+            prof = np.convolve(prof, np.ones(7) / 7, mode='same')
+            tot = prof.sum()
+            c = float((prof * np.arange(analysis_w)).sum() / tot + 0.5) * scale if tot > 1e-3 else None
+        else:
+            c = None
+        centers.append(c)
+        prev = fr
+    # carry through static frames, smooth, velocity-limit
+    out = []
+    last = centers[0] if centers[0] is not None else src_w / 2
+    dt = (end - start) / max(1, len(centers))
+    max_step = src_w / 4 * dt                          # pan the full width in ~4 s
+    for c in centers:
+        if c is not None:
+            alpha = min(1.0, dt / 0.6)
+            last = last + alpha * (c - last)
+        x = min(max(last, crop_w / 2), src_w - crop_w / 2)
+        if out:
+            x = min(max(x, out[-1] - max_step), out[-1] + max_step)
+        out.append(x)
+    return out
+
+def assemble(timeline, music_path, out_mp4, workdir, orient='landscape'):
+    """Cut every window exactly (re-encoded to a uniform format), concat, mix music with fade-out.
+    orient='portrait' auto-crops 9:16 out of the source, tracking motion energy horizontally."""
+    portrait = orient == 'portrait'
     os.makedirs(workdir, exist_ok=True)
     parts = []
     for k, w in enumerate(timeline):
         part = os.path.join(workdir, f'part_{k:03d}.mp4')
+        if portrait:
+            src_w, src_h = _probe_dims(w['video'])
+            crop_w = int(src_h * PORTRAIT_W / PORTRAIT_H) // 2 * 2   # 9:16 window at source res
+            centers = crop_centers(w['video'], w['start'], w['end'], crop_w)
+            cmds = os.path.join(workdir, f'cmds_{k:03d}.txt')
+            with open(cmds, 'w') as fh:
+                for j, x in enumerate(centers):
+                    # -ss before -i resets timestamps: cmd times are relative to the window
+                    fh.write(f"{j * (w['end'] - w['start']) / len(centers):.3f} crop x {int(round(x - crop_w / 2))};\n")
+            vf = (f"scale={src_w}:{src_h},sendcmd=f={cmds},crop={crop_w}:{src_h}:0:0,"
+                  f"scale={PORTRAIT_W}:{PORTRAIT_H},fps={FPS},format=yuv420p")
+        else:
+            vf = f'scale={W}:{H},fps={FPS},format=yuv420p'
         subprocess.run(['ffmpeg', '-v', 'error', '-y', '-ss', f"{w['start']:.3f}", '-to', f"{w['end']:.3f}",
-                        '-i', w['video'], '-vf', f'scale={W}:{H},fps={FPS},format=yuv420p',
+                        '-i', w['video'], '-vf', vf,
                         '-an'] + _venc() + [part], check=True)
         if w.get('reversed'):                          # anti-hike-direction: play backwards
             rev = part + '.rev.mp4'
@@ -532,7 +599,7 @@ def gps_map(timeline, cands, out_png, track=None):
     plt.close(fig)
     return out_png
 
-def build(music_path, dirs, out_mp4, workdir=None, track_path=None, variant='_v3'):
+def build(music_path, dirs, out_mp4, workdir=None, track_path=None, variant='_v3', orient='landscape'):
     bars, bpm, dur = beat_grid(music_path)
     print(f'music: {bpm:.1f} BPM, {len(bars)} bars, {dur:.0f}s', file=sys.stderr)
     track = load_track(track_path) if track_path else None
@@ -547,7 +614,10 @@ def build(music_path, dirs, out_mp4, workdir=None, track_path=None, variant='_v3
     vids = {w['video'] for w in timeline}
     print(f'plan: {len(timeline)} shots, {total:.1f}s of video (music {dur:.1f}s), {len(vids)} flights', file=sys.stderr)
     workdir = workdir or tempfile.mkdtemp(prefix='dronesift_draft_')
-    assemble(timeline, music_path, out_mp4, workdir)
+    if orient == 'portrait' and 'portrait' not in out_mp4.lower():
+        root, ext = os.path.splitext(out_mp4)
+        out_mp4 = root + '_portrait' + ext
+    assemble(timeline, music_path, out_mp4, workdir, orient)
     ej = os.path.splitext(out_mp4)[0] + '_edit.json'
     json.dump(dict(music=music_path, bpm=bpm, slots=slots, timeline=timeline,
                    total_s=total, shots=len(timeline)), open(ej, 'w'), indent=1, ensure_ascii=False)
@@ -565,6 +635,8 @@ if __name__ == '__main__':
     ap.add_argument('--workdir', default=None)
     ap.add_argument('--track', default=None, help='KML hiking track: order scenes by track progress')
     ap.add_argument('--variant', default='_v3', help='results-dir suffix to cut from (e.g. _v4)')
+    ap.add_argument('--orient', choices=['landscape', 'portrait'], default='landscape',
+                    help='portrait auto-crops 9:16, tracking the motion centre, for phones')
     a = ap.parse_args()
-    out, tl = build(a.music, a.dirs, a.o, a.workdir, a.track, a.variant)
+    out, tl = build(a.music, a.dirs, a.o, a.workdir, a.track, a.variant, a.orient)
     print(out)

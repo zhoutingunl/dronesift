@@ -113,6 +113,23 @@ Full engineering notes (in Chinese, with worked failure cases) are in
 `./batch.sh DIR...` walks directories of MP4s two at a time and `python -m dronesift.summary OUT DIR...`
 builds a browsable index of every flight with its timeline chart and labels.
 
+## Music draft (experimental)
+
+`dronesift.edit` assembles a beat-quantised draft from a whole shoot: the song's bar grid decides
+where every clip starts and how long it is, footage is cut to those exact lengths in hiking/shooting
+order (scene blocks, move-direction aware, reversed playback only as a fallback), and the result is
+mixed with the music:
+
+```bash
+uv run python -m dronesift.edit music.mp3 /path/to/shoot -o draft.mp4 \
+    --track hike.kml --variant _v4 --orient portrait
+```
+
+`--orient portrait` auto-crops 9:16 for phones: a per-frame motion-energy centroid steers the
+crop window (smoothed and velocity-limited so the virtual camera pans, never whips), cutting from
+the 4K source so portrait stays lossless-sharp. Outputs `draft.mp4`, `draft_edit.json` and a
+`draft_gps.png` map of every stable segment with the used shots numbered.
+
 ## GUI (experimental)
 
 A minimal PySide6 app for the drop-folder → review → export loop:
