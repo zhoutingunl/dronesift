@@ -89,10 +89,13 @@ analysis pass).
    comes back): the fraction of frames whose high-frequency flow flips direction within 0.1 s gates
    every image veto. A violent excursion that never reverses — a whip tilt, a MasterShots move —
    reads as an intentional move and is kept, however fast; motion that oscillates is dropped even
-   at small amplitude. Telemetry (aircraft/gimbal acceleration) only vetoes frames whose image is
-   actually oscillating. Short shake bursts (a manual dial snap) get a dedicated 0.15 s RMS
-   detector — the sustained-shake median filter would dilute them below threshold — and break the
-   segment instead of being merged across.
+   at small amplitude. Slow reversals are caught too: a translation/zoom component that changes
+   sign mid-shot (pan right… then left) is contradictory motion the eye rejects even though each
+   component alone would be regular (rotation is exempt — orbit direction changes are choreographed).
+   Telemetry (aircraft/gimbal acceleration) only vetoes frames whose image is actually oscillating.
+   Short shake bursts (a manual dial snap) get a dedicated 0.15 s RMS detector — the
+   sustained-shake median filter would dilute them below threshold — and break the segment instead
+   of being merged across.
 4. **Labelling** — kept runs are merged across sub-second gaps, trimmed, and described as a
    move sequence: `push_in>orbit_CW`, `pull_back+pan>orbit_CCW`, `dronie`, `spiral_out`,
    `truck_L`, ... with the implied orbit radius from v_lat / yaw rate.

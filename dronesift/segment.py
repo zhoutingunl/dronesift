@@ -40,7 +40,7 @@ def aligned_tel(tel, n, fps):
     cols = {k: (np.pad(v[:m], (0, n - m), mode='edge') if m else np.zeros(n)) for k, v in cols.items()}
     return cols, np.arange(n) < m   # no usable pts: old index alignment, last value extended
 
-def features(tel, flow, fps=FPS, tel_sigma_s=0.5, vis_sigma_s=1.0, hf_sigma_s=0.15):
+def features(tel, flow, fps=FPS, tel_sigma_s=0.5, vis_sigma_s=1.0, hf_sigma_s=0.15, rev_amp=25.0):
     """Return dict of per-frame feature arrays (length = len(flow)) plus the 'tel_ok' coverage mask."""
     n = len(flow)
     s_t = tel_sigma_s * fps; s_v = vis_sigma_s * fps; s_h = hf_sigma_s * fps
@@ -93,6 +93,18 @@ def features(tel, flow, fps=FPS, tel_sigma_s=0.5, vis_sigma_s=1.0, hf_sigma_s=0.
     msm = gaussian_filter1d(np.hypot(jdx, jdy), s_v)
     f['motion_px'] = msm + np.abs(f['da_sm']) * w / 2 + np.abs(f['ds_sm']) * w / 2     # px/s
     f['motion_acc'] = np.abs(_deriv(f['motion_px'], fps))                               # px/s^2
+    # slow component reversal: a translation/zoom component that changes SIGN inside the shot
+    # (pan right... then left, push decaying into a drift back) reads as contradictory motion
+    # even at low frequency, where hf_flip cannot see it. Rotation is exempt: orbit direction
+    # changes are choreographed moves. Frames near such a crossing are vetoed.
+    from scipy.ndimage import maximum_filter1d
+    rev = np.zeros(n, bool)
+    rwin = int(2.5 * fps) | 1
+    for c in (f['dx_sm'], f['dy_sm'], f['ds_sm'] * w / 2):
+        pos_env = maximum_filter1d(np.maximum(c, 0), rwin)
+        neg_env = maximum_filter1d(np.maximum(-c, 0), rwin)
+        rev |= (pos_env > rev_amp) & (neg_env > rev_amp)
+    f['motion_reversal'] = rev
     # perceptual shake = image motion that REVERSES (oscillates around its path: deviates and comes
     # back). A single fast excursion (whip tilt/pan, MasterShots moves) never reverses and reads as
     # an intentional move, however violent. Metric: fraction of frames whose hf flow flips sign in 0.1 s.
@@ -120,6 +132,9 @@ def features(tel, flow, fps=FPS, tel_sigma_s=0.5, vis_sigma_s=1.0, hf_sigma_s=0.
 DEFAULT_THR = dict(
     jitter_px=30.0,       # rms image motion above ~1 Hz, px/s at 640px width (≈0.5 px/frame @60fps)
     hf_flip=0.25,         # perceptual shake gate: image motion only counts as shake when it REVERSES
+    motion_rev_amp=25.0,  # slow component reversal (pan/track/zoom changing sign mid-shot, px/s at
+                          # 640 width, ±2.5 s envelope): multiple contradictory changes read as
+                          # unstable even when each alone would be regular. Rotation is exempt.
                           # (>= this fraction of frames flip hf direction in 0.1 s). A violent but
                           # never-reversing excursion (whip tilt, MasterShots moves) is an intentional
                           # move. 0 disables the gate (legacy behaviour).
@@ -197,6 +212,9 @@ def keep_mask(f, thr, labels=None):
     keep &= (f['expo_jump'] < thr['expo_jump']) & (np.abs(np.gradient(f['ev'])) == 0)   # exposure jumps / EV dial changes
     keep &= f['tel_ok']                                                                 # frames without telemetry cannot be judged
     keep &= ~spike_mask(f, thr)                                                         # shake bursts must break the segment
+    if thr.get('motion_rev_amp', 0) > 0:                                                # slow contradictory component changes
+        keep &= ~(f['motion_reversal'] if 'motion_reversal' in f
+                  else np.zeros(len(f['speed3']), bool))
     return keep
 
 def classify_frames(f, thr, fps=FPS):

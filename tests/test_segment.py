@@ -20,7 +20,8 @@ def make_feat(n, **over):
              vx=np.full(n, 3.0), vy=z, vz=z, g_yaw=z, g_pitch=np.full(n, -10.0), ac_yaw_rate=z,
              yaw_rate=z, pitch_rate=z, yaw_acc=one, pitch_acc=one, acc_h=z, acc_z=z, acc_tan=z,
              rel_alt=np.full(n, 20.0), iso=np.full(n, 100.0), ev=z, expo_jump=np.full(n, 0.1),
-             jitter=one, jitter_rms=one, jitter_burst=one, hf_flip=one, motion_px=np.full(n, 100.0), motion_acc=np.full(n, 10.0),
+             jitter=one, jitter_rms=one, jitter_burst=one, hf_flip=one, motion_reversal=np.zeros(n, bool),
+             motion_px=np.full(n, 100.0), motion_acc=np.full(n, 10.0),
              vmag=np.full(n, 100.0), consist=one, radius=np.full(n, 100.0), blur_drop=one,
              residual=np.full(n, 0.1), n_tracks=np.full(n, 50.0),
              dx_raw=z, dy_raw=z, da_raw=z, ds_raw=z, dx_sm=z, dy_sm=z, da_sm=z, ds_sm=z,
@@ -119,6 +120,15 @@ def test_coherent_burst_does_not_split():
     burst = np.ones(200); burst[100:106] = 200.0
     f = make_feat(200, jitter_burst=burst, hf_flip=np.zeros(200))
     assert not seg.spike_mask(f, dict(seg.DEFAULT_THR), fps).any()
+
+def test_slow_component_reversal_is_dropped():
+    """A component changing sign mid-shot (pan right... then left) reads as contradictory motion
+    even though the hf_flip gate misses the slow reversal."""
+    thr = dict(seg.DEFAULT_THR)
+    f = make_feat(30, motion_reversal=np.full(30, True))
+    assert not seg.keep_mask(f, thr).any()
+    f = make_feat(30, motion_reversal=np.full(30, False))
+    assert seg.keep_mask(f, thr).all()
 
 def test_segments_merges_short_gaps_and_trims():
     fps = 10; f = make_feat(100); labels = np.array(['push'] * 100)
