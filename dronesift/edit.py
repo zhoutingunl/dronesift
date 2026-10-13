@@ -235,7 +235,7 @@ class Candidate:
         k = self.a + int(idx[int(np.argmax(self.cs[idx + L] - self.cs[idx]))])
         w = dict(video=self.video, start=k / self.fps, end=(k + L) / self.fps,
                  duration=dur, rich=self.rich, base=self.seg['base'], label=self.seg['label'],
-                 source=self.seg, fps=self.fps)
+                 source=self.seg, fps=self.fps, move=self.move)
         self.cursor = k + L + int(0.3 * self.fps)       # continue after the used window
         return w
 
@@ -373,12 +373,11 @@ def music_slots(bars, music_dur, pattern=(2, 2, 4), min_dur=DUR_MIN):
         i += u
     return slots
 
-def plan_slots(cands, slots, max_per_flight=2, lookahead=6):
+def plan_slots(cands, slots, max_per_flight=2):
     """Fill the music slots: the slot list comes from the beat grid; footage is cut to each slot's
-    exact length, consumed in narrative order (hike pass + track position). Straight shots whose
-    original direction matches the hiking direction are preferred — a candidate that would need
-    reversed playback is only used when the next few candidates offer nothing better (and then it
-    IS played backwards, which reads as the opposite move). Rotations need no preference."""
+    exact length, consumed in strict narrative order (hike pass + track position + capture time).
+    Straight shots that travel against the hiking direction are played backwards — a reversed push
+    reads as a pull — so direction matches the walk without ever breaking the narrative order."""
     timeline = []
     used = {}
     queue = list(cands)
@@ -390,29 +389,42 @@ def plan_slots(cands, slots, max_per_flight=2, lookahead=6):
         queue = [c for c in queue if c.video in keepv]
         max_per_flight = 1
         print(f'sampling {len(keepv)} of {len(flights)} flights to span the whole hike', file=sys.stderr)
+    # reserve the final slot for the day's final footage — the closing shot of the montage
+    closing = None
+    if slots and queue:
+        last_c = max(queue, key=lambda c: c.order_key)
+        t0l, durl = slots[-1]
+        if last_c.end - last_c.cursor >= durl * last_c.fps:
+            closing = last_c.take(durl)
+            if closing is not None:
+                closing.update(slot=len(slots) - 1, slot_start=t0l)
+                queue.remove(last_c)
+                slots = slots[:-1]
     for si, (t0, dur) in enumerate(slots):
-        viable = []
+        pick = None
         for pos, c in enumerate(queue):
             if used.get(c.video, 0) >= max_per_flight:
                 continue
             if c.end - c.cursor >= dur * c.fps:
-                viable.append((pos, c))
-                if len(viable) >= lookahead:
-                    break
-        if not viable:
+                pick = pos
+                break
+        if pick is None:
             break
-        def needs_rev(pc):
-            _, c = pc
-            return 1 if c.dir_aligned is False else 0   # aligned / neutral first, anti last
-        pos, c = min(viable, key=needs_rev)
+        c = queue[pick]
         w = c.take(dur)
         if w is None:
-            queue.pop(pos)                             # exhausted: drop and retry this slot
+            queue.pop(pick)                            # exhausted: drop and retry this slot
             continue
+        # the montage never reorders for direction: jumping to an aligned shot elsewhere breaks
+        # the hike narrative (village-from-the-summit ... back to the morning valley). Instead an
+        # anti-direction straight shot is played backwards, which reads as the opposite move.
         w.update(slot=si, slot_start=t0, seq=len(timeline) + 1, cuts_dir=c.cuts_dir, move=c.move,
                  reversed=bool(c.dir_aligned is False))
         used[c.video] = used.get(c.video, 0) + 1
         timeline.append(w)
+    if closing is not None:                            # the day's last footage closes the montage
+        closing['seq'] = len(timeline) + 1
+        timeline.append(closing)
     return timeline
 
 def _venc():
