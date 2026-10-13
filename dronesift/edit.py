@@ -356,11 +356,12 @@ def music_slots(bars, music_dur, pattern=(2, 2, 4), min_dur=DUR_MIN):
         i += u
     return slots
 
-def plan_slots(cands, slots, max_per_flight=2):
-    """Fill the music slots in narrative order: each slot cuts its exact duration from the next
-    candidate in line that still has enough footage (slots first, footage second — not 'segments
-    that happen to match the length'). When there are more flights than slots, flights are
-    sampled evenly along the hike so every part of the trail is represented, one window each."""
+def plan_slots(cands, slots, max_per_flight=2, lookahead=6):
+    """Fill the music slots: the slot list comes from the beat grid; footage is cut to each slot's
+    exact length, consumed in narrative order (hike pass + track position). Straight shots whose
+    original direction matches the hiking direction are preferred — a candidate that would need
+    reversed playback is only used when the next few candidates offer nothing better (and then it
+    IS played backwards, which reads as the opposite move). Rotations need no preference."""
     timeline = []
     used = {}
     queue = list(cands)
@@ -373,22 +374,24 @@ def plan_slots(cands, slots, max_per_flight=2):
         max_per_flight = 1
         print(f'sampling {len(keepv)} of {len(flights)} flights to span the whole hike', file=sys.stderr)
     for si, (t0, dur) in enumerate(slots):
-        pick = None
+        viable = []
         for pos, c in enumerate(queue):
             if used.get(c.video, 0) >= max_per_flight:
                 continue
             if c.end - c.cursor >= dur * c.fps:
-                pick = pos
-                break
-        if pick is None:
+                viable.append((pos, c))
+                if len(viable) >= lookahead:
+                    break
+        if not viable:
             break
-        c = queue[pick]
+        def needs_rev(pc):
+            _, c = pc
+            return 1 if c.dir_aligned is False else 0   # aligned / neutral first, anti last
+        pos, c = min(viable, key=needs_rev)
         w = c.take(dur)
         if w is None:
-            queue.pop(pick)                            # exhausted: drop and retry this slot
+            queue.pop(pos)                             # exhausted: drop and retry this slot
             continue
-        # anti-hike-direction straight shots are played backwards (a reversed push reads as a
-        # pull) so the montage keeps strict narrative order AND matches the walking direction
         w.update(slot=si, slot_start=t0, seq=len(timeline) + 1, cuts_dir=c.cuts_dir, move=c.move,
                  reversed=bool(c.dir_aligned is False))
         used[c.video] = used.get(c.video, 0) + 1
@@ -513,13 +516,13 @@ def gps_map(timeline, cands, out_png, track=None):
     plt.close(fig)
     return out_png
 
-def build(music_path, dirs, out_mp4, workdir=None, track_path=None):
+def build(music_path, dirs, out_mp4, workdir=None, track_path=None, variant='_v3'):
     bars, bpm, dur = beat_grid(music_path)
     print(f'music: {bpm:.1f} BPM, {len(bars)} bars, {dur:.0f}s', file=sys.stderr)
     track = load_track(track_path) if track_path else None
     if track is not None:
         print(f'hike track: {len(track[0])} points — drawn on the GPS map', file=sys.stderr)
-    cands, cands_all = make_candidates(dirs, track=track, track_path=track_path)
+    cands, cands_all = make_candidates(dirs, variant=variant, track=track, track_path=track_path)
     print(f'{len(cands)} planning candidates, {len(cands_all)} stable segments on the map (from _cuts_v3)', file=sys.stderr)
     slots = music_slots(bars, dur)
     print(f'music slots: {len(slots)} ({", ".join(f"{d:.1f}s" for _, d in slots)})', file=sys.stderr)
@@ -545,6 +548,7 @@ if __name__ == '__main__':
     ap.add_argument('-o', default='draft.mp4')
     ap.add_argument('--workdir', default=None)
     ap.add_argument('--track', default=None, help='KML hiking track: order scenes by track progress')
+    ap.add_argument('--variant', default='_v3', help='results-dir suffix to cut from (e.g. _v4)')
     a = ap.parse_args()
-    out, tl = build(a.music, a.dirs, a.o, a.workdir, a.track)
+    out, tl = build(a.music, a.dirs, a.o, a.workdir, a.track, a.variant)
     print(out)
