@@ -202,6 +202,13 @@ class Candidate:
         self.cursor = a
         self.end = b
         self.move = seg['base'].partition('+')[0]
+        # per-frame aliveness: how much is happening (dead hover portions lose every window fight)
+        alive = np.nan_to_num(np.asarray(feats['motion_px'][sl], dtype=float))
+        self.alive = alive
+        self.cs = np.concatenate(([0.0], np.cumsum(alive)))
+        self.b = min(self.b, a + len(alive) - 1)        # features arrays can be shorter than the seg
+        self.end = min(self.end, self.b)
+        self.cursor = min(self.cursor, self.end)
 
     @property
     def order_key(self):
@@ -213,13 +220,22 @@ class Candidate:
         return float(np.clip(d, DUR_MIN, DUR_MAX))
 
     def take(self, dur):
-        """Pop the next window of `dur` seconds from this segment, or None."""
-        if self.end - self.cursor < dur * self.fps:
+        """Pop a window of `dur` seconds from this segment, or None. The window is placed where
+        the footage is most alive (max summed motion) — never over a dead stop-start stretch."""
+        L = int(dur * self.fps)
+        if self.end - self.cursor < L:
             return None
-        w = dict(video=self.video, start=self.cursor / self.fps, end=(self.cursor + dur * self.fps) / self.fps,
+        lo, hi = self.cursor - self.a, self.end - self.a - L   # cs is indexed relative to self.a
+        step = max(1, int(self.fps // 4))
+        idx = list(range(lo, hi + 1, step))
+        if idx[-1] != hi:
+            idx.append(hi)
+        idx = np.array(idx)
+        k = self.a + int(idx[int(np.argmax(self.cs[idx + L] - self.cs[idx]))])
+        w = dict(video=self.video, start=k / self.fps, end=(k + L) / self.fps,
                  duration=dur, rich=self.rich, base=self.seg['base'], label=self.seg['label'],
                  source=self.seg, fps=self.fps)
-        self.cursor += int(dur * self.fps) + int(0.3 * self.fps)   # small gap between windows
+        self.cursor = k + L + int(0.3 * self.fps)       # continue after the used window
         return w
 
 # ---------------------------------------------------------------- assembly
