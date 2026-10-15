@@ -89,6 +89,11 @@ uv run python -m dronesift.assess_speed /path/to/DJI_xxx_cuts_v6 --output-fps 30
 导出子片段继承的整段估计只供参考；合成时必须对**实际消费的精确原片区间**、
 目标播放倍率和输出帧率重新评估。选片与渲染会拒绝超限加速；旧加速计划缺少评估时也会被拦住。
 
+人工审阅的 `no_track` 合成计划还可按拍摄顺序插入照片：使用 `media_type: "photo"`、
+`image`、绝对输出帧 `start_frame`/`end_frame`，以及可选的 `photo_motion`
+（`zoom_start`、`zoom_end`、归一化构图中心 `center_x`/`center_y`）。照片使用轻微推拉和
+16:9 裁切，停留时间不冒充原片时长或稳定运镜证据。照片挑选与主体构图仍需审阅，自动选片只选视频。
+
 ### 1. 数据来源:MP4 内嵌 `djmd` 轨,而不是 SRT
 
 Air 3S(以及 Air 3 / Mini 4 Pro / Mavic 3 等新固件)MP4 里有 `djmd` 数据轨,protobuf 编码(`dvtm_Air3s.proto`),

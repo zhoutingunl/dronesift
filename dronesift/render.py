@@ -46,6 +46,24 @@ def music_info(path, sample_rate=48000):
                 samples=samples, duration=samples / sample_rate, audio_start=0.0)
 
 
+def _photo_motion(value):
+    """Normalized initial crop centre and a small, eased, forward photo zoom."""
+    defaults = dict(zoom_start=1.0, zoom_end=1.03, center_x=0.5, center_y=0.5)
+    if value is None:
+        return defaults
+    if not isinstance(value, dict) or set(value) - set(defaults):
+        raise ValueError('photo_motion must contain only zoom_start/zoom_end/center_x/center_y')
+    motion = dict(defaults, **value)
+    for key, number in motion.items():
+        if isinstance(number, bool) or not isinstance(number, Real) or not math.isfinite(number):
+            raise ValueError(f'photo_motion {key} must be finite')
+        if key.startswith('zoom_') and not 1 <= number <= 1.15:
+            raise ValueError('photo_motion zoom must be between 1 and 1.15')
+        if key.startswith('center_') and not 0 <= number <= 1:
+            raise ValueError('photo_motion crop centre must be between 0 and 1')
+    return {key: float(number) for key, number in motion.items()}
+
+
 def frame_timeline(rows, music_duration, fps=30, *, allow_reverse=False):
     """Validate full coverage and safe sources; quantise cumulative boundaries once."""
     if not rows or not math.isfinite(music_duration) or music_duration <= 0:
@@ -62,17 +80,18 @@ def frame_timeline(rows, music_duration, fps=30, *, allow_reverse=False):
             raise ValueError("Timeline must include the full music intro and outro")
     cursor, elapsed, result = 0, 0.0, []
     for i, row in enumerate(rows):
+        media_type = row.get('media_type', 'video')
+        if media_type not in ('video', 'photo'):
+            raise ValueError(f'Unknown media_type in shot {i + 1}')
         reverse = bool(row.get("reversed"))
+        if media_type == 'photo' and reverse:
+            raise ValueError('Photos cannot be reversed')
         if reverse and not allow_reverse:
             raise ValueError("Reverse playback requires allow_reverse=True")
         speed = row.get("playback_speed", 1.0)
         if isinstance(speed, bool) or not isinstance(speed, Real) or not math.isfinite(speed) or speed <= 0:
             raise ValueError(f"Shot {i + 1} playback_speed must be a finite positive number")
         speed = float(speed)
-        start = float(row.get("source_start", row.get("start", math.nan)))
-        end = float(row.get("source_end", row.get("end", math.nan)))
-        if not (math.isfinite(start) and math.isfinite(end) and 0 <= start < end):
-            raise ValueError(f"Invalid source bounds in shot {i + 1}")
         if explicit:
             a, b = row["start_frame"], row["end_frame"]
             if int(a) != a or int(b) != b:
@@ -86,6 +105,32 @@ def frame_timeline(rows, music_duration, fps=30, *, allow_reverse=False):
         if a != cursor or b <= a:
             raise ValueError(f"Timeline gap, overlap or empty shot at row {i + 1}")
         duration = (b - a) / fps
+        if media_type == 'photo':
+            if speed != 1:
+                raise ValueError('Photos require playback_speed=1; use photo_motion instead')
+            video_only = ('video', 'start', 'end', 'source_start', 'source_end',
+                          'source_consumed_start', 'source_consumed_end', 'source_consumed_duration',
+                          'playback_speed_profile', 'max_playback_speed')
+            if any(row.get(key) is not None for key in video_only):
+                raise ValueError('Photos cannot declare video source consumption or playback-speed profiles')
+            image = row.get('image')
+            if not isinstance(image, (str, Path)) or not str(image):
+                raise ValueError('A photo row requires an image path')
+            image = Path(image).resolve()
+            if not image.is_file():
+                raise FileNotFoundError(image)
+            out = {key: value for key, value in row.items() if key not in video_only}
+            out.update(media_type='photo', image=str(image), photo_motion=_photo_motion(row.get('photo_motion')),
+                       start_frame=a, end_frame=b, frames=b-a, duration=duration,
+                       output_start=a/fps, output_end=b/fps, output_fps=fps,
+                       playback_speed=1.0, reversed=False)
+            result.append(out)
+            cursor = b
+            continue
+        start = float(row.get("source_start", row.get("start", math.nan)))
+        end = float(row.get("source_end", row.get("end", math.nan)))
+        if not (math.isfinite(start) and math.isfinite(end) and 0 <= start < end):
+            raise ValueError(f"Invalid source bounds in shot {i + 1}")
         # The planner reserves one output-frame margin for the last slot.
         # A short source is never made longer by freezing its last frame.
         consumed = duration * speed
@@ -97,7 +142,7 @@ def frame_timeline(rows, music_duration, fps=30, *, allow_reverse=False):
         video = Path(row["video"]).resolve()
         if not video.is_file():
             raise FileNotFoundError(video)
-        out = dict(row, video=str(video), source_start=start, source_end=end,
+        out = dict(row, media_type='video', video=str(video), source_start=start, source_end=end,
                    start_frame=a, end_frame=b, frames=b - a, duration=duration,
                    output_start=a / fps, output_end=b / fps, reversed=reverse,
                    playback_speed=speed, source_consumed_duration=consumed,
@@ -135,6 +180,9 @@ def probe_acceleration(video, workdir, *, width=1920, height=1080, fps=30, start
         result["encoder_reason"] = enc.stderr.strip()[:1800]
     if encoder_probe.exists():
         encoder_probe.unlink()
+    if video is None:
+        result['decoder_reason'] = 'photo-only montage; still images use software decoding'
+        return result
     dec = subprocess.run(
         ["ffmpeg", "-v", "error", "-hwaccel", "videotoolbox", "-ss", f"{start:.9f}",
          "-i", str(video), "-frames:v", "2", "-vf", "scale=160:90", "-an", "-f", "null", "-"],
@@ -167,6 +215,36 @@ def _color_args(stream):
 
 def _concat_quote(path):
     return str(path).replace("'", "'\\''")
+
+
+def _photo_filter(row, width, height, fps):
+    """Cover-crop once, then sample zoom from a 4x, 4:4:4 intermediate.
+
+    A source crop step is at most a quarter output pixel, avoiding the one-pixel
+    stair stepping of zoompan applied directly at final 4:2:0 resolution. Only
+    one still is enlarged; zoompan emits final-size frames, not 8K video frames.
+    centre_x/y identify the initial crop centre in the original photograph.
+    Ordinary DJI JPEG/sRGB images are converted from full-range samples to
+    BT.709 limited range, including the sRGB -> BT.709 transfer conversion.
+    """
+    motion = row['photo_motion']
+    large_w, large_h = width * 4, height * 4
+    zoom = (f"{motion['zoom_start']:.12g}+({motion['zoom_end']-motion['zoom_start']:.12g})"
+            f"*(1-cos(PI*on/{max(1, row['frames']-1)}))/2")
+    return (
+        f"scale={large_w}:{large_h}:force_original_aspect_ratio=increase:flags=lanczos:"
+        "in_range=full:out_range=limited:out_color_matrix=bt709,format=yuv444p,"
+        "colorspace=ispace=bt709:iprimaries=bt709:itrc=iec61966-2-1:irange=tv:"
+        "all=bt709:range=tv:format=yuv444p,"
+        f"crop={large_w}:{large_h}:"
+        f"x='max(0,min(iw-ow,iw*{motion['center_x']:.12g}-ow/2))':"
+        f"y='max(0,min(ih-oh,ih*{motion['center_y']:.12g}-oh/2))',"
+        f"zoompan=z='{zoom}':x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2':"
+        f"d={row['frames']}:s={width}x{height}:fps={fps},"
+        "setsar=1,format=yuv420p,"
+        "setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709,"
+        f"trim=end_frame={row['frames']},setpts=PTS-STARTPTS"
+    )
 
 
 def validate_montage(output, rows, music, fps=30, width=1920, height=1080):
@@ -210,10 +288,13 @@ def render_montage(rows, music_path, output_path, workdir=None, *, fps=30,
                    allow_reverse=False):
     """Render stable windows, then mux the complete music forward from zero.
 
-    Each row supplies video, source_start/source_end (or start/end), duration,
+    Video rows supply video, source_start/source_end (or start/end), duration,
     and optionally contiguous start_frame/end_frame and playback_speed (default
     1). Speed changes consume proportionally more source while preserving music
     and cut frames. Explicit reversed rows require allow_reverse=True.
+    Photo rows supply media_type='photo', image, the same output frame grid,
+    and optional photo_motion (zoom_start/end and normalized crop centre).
+    Photos use eased motion, never video source consumption or speed profiles.
     Returns a validated report.
     """
     output = Path(output_path).resolve()
@@ -222,31 +303,43 @@ def render_montage(rows, music_path, output_path, workdir=None, *, fps=30,
     work.mkdir(parents=True, exist_ok=True)
     music = music_info(music_path)
     timeline = frame_timeline(rows, music["duration"], fps, allow_reverse=allow_reverse)
-    speed_checks = [validate_playback_speed(row,
+    speed_checks = [dict(media_type='photo', status='not_applicable', image=row['image'])
+        if row['media_type'] == 'photo' else validate_playback_speed(row,
         source_start=row['source_consumed_start'], source_end=row['source_consumed_end'],
         output_fps=fps, require_assessment=True) for row in timeline]
-    acceleration = (probe_acceleration(timeline[0]["video"], work, width=width, height=height,
-                                       fps=fps, start=timeline[0]["source_start"])
+    first_video = next((row for row in timeline if row['media_type'] == 'video'), None)
+    acceleration = (probe_acceleration(first_video['video'] if first_video else None,
+                                       work, width=width, height=height, fps=fps,
+                                       start=first_video['source_start'] if first_video else 0)
                     if use_hardware else dict(encoder="libx264", decoder=None,
                                               encoder_reason="hardware disabled", decoder_reason="hardware disabled"))
     sources, parts, part_reports = {}, [], []
     for i, row in enumerate(timeline):
-        video = row["video"]
-        if video not in sources:
-            sources[video] = _video_stream(probe_media(video))
-        stream = sources[video]
-        source_duration = float(stream.get("duration", math.inf))
-        if row["source_end"] > source_duration + 1e-4:
-            raise ValueError(f"Shot {i + 1} extends beyond the source video")
+        photo = row['media_type'] == 'photo'
         part = work / f"part_{i:03d}.mp4"
-        source_range = "full" if stream.get("color_range") == "pc" else "limited"
-        vf = (f"trim=end={min(row['source_end'] - row['source_start'], row['source_consumed_duration']):.9f},"
-              f"setpts=(PTS-STARTPTS)/{row['playback_speed']:.12g},"
-              f"fps={fps}:start_time=0:round=near,"
-              f"scale={width}:{height}:force_original_aspect_ratio=decrease:"
-              f"force_divisible_by=2:in_range={source_range}:out_range=limited,"
-              f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,"
-              f"trim=end_frame={row['frames']}")
+        if photo:
+            vf = _photo_filter(row, width, height, fps)
+            stream = dict(color_primaries='bt709', color_transfer='bt709', color_space='bt709')
+        else:
+            video = row['video']
+            if video not in sources:
+                sources[video] = _video_stream(probe_media(video))
+            stream = sources[video]
+            source_duration = float(stream.get("duration", math.inf))
+            if row["source_end"] > source_duration + 1e-4:
+                raise ValueError(f"Shot {i + 1} extends beyond the source video")
+            source_range = "full" if stream.get("color_range") == "pc" else "limited"
+            vf = (f"trim=end={min(row['source_end'] - row['source_start'], row['source_consumed_duration']):.9f},"
+                  f"setpts=(PTS-STARTPTS)/{row['playback_speed']:.12g},"
+                  # Rounding an EOF timestamp down can drop the final valid
+                  # CFR sample at nonintegral source rates (e.g. 29.97 -> 30).
+                  # Pass the last in-range frame through that sample; never
+                  # extend the source trim or pad an exhausted source window.
+                  f"fps={fps}:start_time=0:round=near:eof_action=pass,"
+                  f"scale={width}:{height}:force_original_aspect_ratio=decrease:"
+                  f"force_divisible_by=2:in_range={source_range}:out_range=limited,"
+                  f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,"
+                  f"trim=end_frame={row['frames']}")
         if row["reversed"]:
             # Buffer only the selected, scaled 8-bit output frames, rather
             # than a whole original 4K/60 fps window.  Fade is applied after
@@ -257,13 +350,17 @@ def render_montage(rows, music_path, output_path, workdir=None, *, fps=30,
             # Fade reaches the same musical endpoint as the attached audio.
             fade_start = max(0.0, music["duration"] - row["output_start"] - fade)
             vf += f",fade=t=out:st={fade_start:.9f}:d={fade:.9f}"
-        decoder = acceleration["decoder"]
+        decoder = None if photo else acceleration["decoder"]
         encoder = acceleration["encoder"]
         cmd = ["ffmpeg", "-v", "error", "-y", "-threads", "4", "-filter_threads", "2"]
         if decoder:
             cmd += ["-hwaccel", decoder]
-        cmd += ["-ss", f"{row['source_start']:.9f}", "-i", video,
-                "-map", "0:v:0", "-an", "-vf", vf, "-frames:v", str(row["frames"])]
+        if photo:
+            cmd += ['-f', 'image2', '-pattern_type', 'none', '-i', row['image'],
+                    '-map_metadata', '-1', '-map_chapters', '-1']
+        else:
+            cmd += ["-ss", f"{row['source_start']:.9f}", "-i", video]
+        cmd += ["-map", "0:v:0", "-an", "-vf", vf, "-frames:v", str(row["frames"])]
         cmd += _encoder_args(encoder, fps) + _color_args(stream)
         cmd += ["-video_track_timescale", "90000", "-movflags", "+faststart", str(part)]
         result = subprocess.run(cmd, capture_output=True, text=True)
@@ -284,7 +381,15 @@ def render_montage(rows, music_path, output_path, workdir=None, *, fps=30,
         count = int(actual.get("nb_read_frames", actual.get("nb_frames", 0)))
         if count != row["frames"]:
             raise RuntimeError(f"Shot {i + 1} decoded to {count} frames; expected {row['frames']}; refusing freeze/padding")
-        part_reports.append(dict(part=str(part), frames=count,
+        if photo:
+            part_reports.append(dict(part=str(part), media_type='photo', image=row['image'],
+                                     frames=count, start_frame=row['start_frame'], end_frame=row['end_frame'],
+                                     duration=row['duration'], photo_motion=row['photo_motion'],
+                                     photo_motion_method='cosine_zoom_4x_yuv444_cover_crop',
+                                     photo_input_color_assumption='sRGB_full_range',
+                                     output_color='bt709_limited', playback_speed=1.0, reversed=False))
+        else:
+            part_reports.append(dict(part=str(part), media_type='video', frames=count,
                                  source_start=row["source_start"], source_end=row["source_end"],
                                  playback_speed=row["playback_speed"],
                                  source_consumed_start=row["source_consumed_start"],
@@ -293,10 +398,11 @@ def render_montage(rows, music_path, output_path, workdir=None, *, fps=30,
                                  max_playback_speed=row.get('max_playback_speed'),
                                  playback_speed_profile=row.get('playback_speed_profile'),
                                  start_frame=row["start_frame"], end_frame=row["end_frame"],
-                                 reversed=row["reversed"]))
+                                     reversed=row["reversed"]))
         parts.append(part)
-        print(f"render [{i + 1}/{len(timeline)}] {Path(video).name} "
-              f"{row['source_start']:.3f}–{row['source_end']:.3f}s -> "
+        description = (f"photo {Path(row['image']).name}" if photo else
+                       f"{Path(video).name} {row['source_start']:.3f}–{row['source_end']:.3f}s")
+        print(f"render [{i + 1}/{len(timeline)}] {description} -> "
               f"frames {row['start_frame']}–{row['end_frame']}", file=sys.stderr, flush=True)
     concat = work / "concat.ffconcat"
     concat.write_text("ffconcat version 1.0\n" + "".join(f"file '{_concat_quote(p)}'\n" for p in parts), encoding="utf-8")
@@ -318,11 +424,15 @@ def render_montage(rows, music_path, output_path, workdir=None, *, fps=30,
                   allow_reverse=bool(allow_reverse),
                   reversed_shots=sum(row["reversed"] for row in timeline),
                   accelerated_shots=sum(row["playback_speed"] > 1 for row in timeline),
+                  photo_shots=sum(row['media_type'] == 'photo' for row in timeline),
+                  video_shots=sum(row['media_type'] == 'video' for row in timeline),
                   playback_speed_checks=speed_checks,
                   policy=("explicitly approved reverse stable windows; forward full audio from zero; absolute frame cuts"
                           if any(row["reversed"] for row in timeline) else
                           "forward original stable windows; full audio from zero; absolute frame cuts")
-                          + "; per-shot playback_speed preserves music and cut frames")
+                          + "; per-shot playback_speed preserves music and cut frames"
+                          + ('; explicit photo rows use eased zoom and BT.709 limited-range conversion'
+                             if any(row['media_type'] == 'photo' for row in timeline) else ''))
     report_path = output.with_name(output.stem + "_render.json")
     report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     report["report_path"] = str(report_path)

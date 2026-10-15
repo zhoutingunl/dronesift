@@ -54,6 +54,8 @@ def save_plan(plan, output):
     output = Path(output).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     for row in plan['timeline']:
+        if row.get('media_type') == 'photo':
+            continue
         final_cuts = Path(row['video']).parent / (Path(row['video']).stem + '_cuts_v6')
         if final_cuts.is_dir(): row['cuts_dir'] = str(final_cuts)
     plan['summary'] = montage.plan_summary(plan['timeline'])
@@ -95,25 +97,29 @@ def validate_plan(plan, music_path):
     previous_group = None
     previous_capture_end = None
     for row, rendered in zip(plan['timeline'], rendered_timeline):
+        photo = row.get('media_type') == 'photo'
+        if photo and route_mode != 'no_track':
+            raise ValueError('photo inserts require a no_track plan with reviewed capture ordering')
         if capture_order == 'strict':
             if rendered['reversed']:
                 raise ValueError('strict capture order requires forward playback')
-            if (rendered['source_consumed_start'] < row['stable_segment_start'] - 1e-6
+            if not photo and (rendered['source_consumed_start'] < row['stable_segment_start'] - 1e-6
                     or rendered['source_consumed_end'] > row['stable_segment_end'] + 1e-6):
                 raise ValueError('actual playback source extends beyond its stable interval')
             # Use the actual source consumed at this playback rate, including
             # parked cars and landscapes. Edited midpoint metadata cannot
             # make a later parking shot precede an earlier driving shot.
-            source_epoch = montage.capture_datetime(row['video']).timestamp()
-            capture_start = source_epoch + rendered['source_consumed_start']
-            capture_end = source_epoch + rendered['source_consumed_end']
+            source_epoch = montage.capture_datetime(row['image'] if photo else row['video']).timestamp()
+            capture_start = source_epoch if photo else source_epoch + rendered['source_consumed_start']
+            capture_end = source_epoch if photo else source_epoch + rendered['source_consumed_end']
             if previous_capture_end is not None and capture_start < previous_capture_end - 1e-6:
                 raise ValueError('shots do not follow strict source capture order')
             previous_capture_end = capture_end
         if route_mode == 'no_track' and (row.get('hike_bearing_deg') is not None
                                         or row.get('direction_error_deg') is not None):
             raise ValueError('a no_track plan cannot claim hiking direction alignment')
-        if row['start'] < row['stable_segment_start'] - 1e-6 or row['end'] > row['stable_segment_end'] + 1e-6:
+        if not photo and (row['start'] < row['stable_segment_start'] - 1e-6
+                          or row['end'] > row['stable_segment_end'] + 1e-6):
             raise ValueError('a selected window extends beyond its stable interval')
         if row.get('reversed'):
             review = row.get('reverse_safety_review', {})
@@ -133,11 +139,14 @@ def validate_plan(plan, music_path):
         elif route_mode == 'regional' and row['route_s'] + float(plan.get('max_backtrack_m', 250)) < farthest - 1e-6:
             raise ValueError('a regional insert falls outside the current route region')
         for other in used:
-            if row['video'] == other['video'] and row['start'] < other['end'] - 1e-6 and row['end'] > other['start'] + 1e-6:
+            if (not photo and other.get('media_type') != 'photo'
+                    and row['video'] == other['video']
+                    and row['start'] < other['end'] - 1e-6 and row['end'] > other['start'] + 1e-6):
                 raise ValueError('selected source windows overlap')
         if route_mode != 'no_track':
             farthest = max(farthest, row['route_s'])
-        flight_counts[row['video']] = flight_counts.get(row['video'], 0) + 1
+        if not photo:
+            flight_counts[row['video']] = flight_counts.get(row['video'], 0) + 1
         group = row['scene_group']
         group_counts[group] = group_counts.get(group, 0) + 1
         group_run = group_run + 1 if group == previous_group else 1
@@ -146,13 +155,15 @@ def validate_plan(plan, music_path):
         if cap and (horizon is None or len(used) < horizon) and group_run > cap:
             raise ValueError('consecutive scene repetition exceeds the planned limit')
         previous_group = group
-        if plan.get('max_per_flight') and flight_counts[row['video']] > plan['max_per_flight']:
+        if not photo and plan.get('max_per_flight') and flight_counts[row['video']] > plan['max_per_flight']:
             raise ValueError('a source exceeds its planned shot limit')
         if plan.get('max_per_visual_group') and group_counts[group] > plan['max_per_visual_group']:
             raise ValueError('a scene exceeds its planned shot limit')
         used.append(row)
         previous = row
     for row, rendered in zip(plan['timeline'], rendered_timeline):
+        if row.get('media_type') == 'photo':
+            continue
         validate_playback_speed(row, source_start=rendered['source_consumed_start'],
                                 source_end=rendered['source_consumed_end'], output_fps=30,
                                 require_assessment=True)

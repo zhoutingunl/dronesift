@@ -264,6 +264,13 @@ An audited plan can be reused with `--plan PLAN.json`; `--plan-only` saves the
 timeline without rendering. Cut boundaries are absolute output frames, so the
 music starts at zero and rounding does not accumulate across shots.
 
+Reviewed `no_track` plans may also insert photographs in capture order. A photo
+row uses `media_type: "photo"`, `image`, absolute `start_frame`/`end_frame`, and
+optional `photo_motion` (`zoom_start`, `zoom_end`, normalized `center_x`/`center_y`).
+Photos receive a restrained zoom and a 16:9 crop; their display time does not
+pretend to be source-video duration or camera-motion evidence. Photo selection
+and subject framing remain editorial decisions; automatic planning selects video.
+
 `dronesift.edit` assembles a beat-quantised draft from a whole shoot: the song's bar grid decides
 where every clip starts and how long it is, footage is cut to those exact lengths in hiking/shooting
 order (scene blocks, move-direction aware, reversed playback only as a fallback), and the result is

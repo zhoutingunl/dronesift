@@ -767,24 +767,28 @@ def _suffix_feasibility(options_by_slot, route_mode='strict', max_backtrack_m=25
 
 
 def plan_summary(timeline):
+    videos = [r for r in timeline if r.get('media_type', 'video') == 'video']
+    photos = [r for r in timeline if r.get('media_type') == 'photo']
     return dict(shots=len(timeline), total_frames=timeline[-1]['end_frame'] if timeline else 0,
-                flights=len({r['video'] for r in timeline}),
+                video_shots=len(videos), photo_shots=len(photos),
+                flights=len({r['video'] for r in videos}),
                 scene_clusters=len({r['scene_id'] for r in timeline}),
                 visual_scene_groups=len({r['scene_group'] for r in timeline}),
-                rotations=sum(r['rotation'] for r in timeline),
-                consecutive_rotations=any(a['rotation'] and b['rotation'] for a, b in zip(timeline, timeline[1:])),
-                reversed_shots=sum(r['reversed'] for r in timeline),
+                rotations=sum(r['rotation'] for r in videos),
+                consecutive_rotations=any(a.get('rotation', False) and b.get('rotation', False)
+                                          for a, b in zip(timeline, timeline[1:])),
+                reversed_shots=sum(r['reversed'] for r in videos),
                 aligned_straight_shots=sum(r['direction_error_deg'] is not None and r['direction_error_deg'] <= 90
-                                           and r.get('directional', not r['rotation']) for r in timeline),
+                                           and r.get('directional', not r['rotation']) for r in videos),
                 opposed_straight_shots=sum(r['direction_error_deg'] is not None and r['direction_error_deg'] > 90
-                                           and r.get('directional', not r['rotation']) for r in timeline),
-                neutral_shots=sum(not r.get('directional', not r['rotation']) for r in timeline),
+                                           and r.get('directional', not r['rotation']) for r in videos),
+                neutral_shots=len(photos) + sum(not r.get('directional', not r['rotation']) for r in videos),
                 reordered_capture_transitions=sum(a['capture_epoch'] >= b['capture_epoch']
                                                   for a, b in zip(timeline, timeline[1:])),
                 regional_backtrack_shots=sum(r.get('route_backtrack_m', 0) > 3 for r in timeline),
                 max_route_backtrack_m=max((r.get('route_backtrack_m', 0) for r in timeline), default=0),
                 off_track_camera_shots=sum(r.get('camera_route_distance_m', 0) > 50 for r in timeline),
-                all_motion_gates_passed=all(r['quality']['ok'] for r in timeline))
+                all_motion_gates_passed=all(r['quality']['ok'] for r in videos))
 
 
 def main():

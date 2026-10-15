@@ -155,3 +155,42 @@ def test_strict_capture_order_uses_render_bounds_and_disallows_reverse(tmp_path,
     row['reversed'] = True
     with pytest.raises(ValueError, match='strict capture order requires forward'):
         build.validate_plan(edit, 'music')
+
+
+def test_photo_inserts_use_capture_instant_and_do_not_claim_motion_quality(tmp_path, monkeypatch):
+    edit = chronological_plan(tmp_path, monkeypatch)
+    monkeypatch.setattr(build.render, 'music_info', lambda _: {'duration': 6})
+    first, second = edit['timeline']
+    next_video = tmp_path / 'DJI_20260928150004_0003_D.MP4'
+    next_video.touch()
+    second.update(video=str(next_video), start_frame=120, end_frame=180)
+    image = tmp_path / 'DJI_20260928150003_0002_D.JPG'
+    image.touch()
+    photo = dict(media_type='photo', image=str(image), start_frame=60, end_frame=120,
+                 scene_id=2, scene_group='landscape_photo', capture_epoch=150,
+                 direction_error_deg=None, rotation=False)
+    edit['timeline'] = [first, photo, second]
+    summary = build.validate_plan(edit, 'music')
+    assert summary['photo_shots'] == 1
+    assert summary['video_shots'] == 2
+    assert summary['flights'] == 2
+    assert summary['all_motion_gates_passed']
+    # Holding the photo for two seconds does not turn its capture instant into
+    # a two-second recording that overlaps the following video at 15:00:04.
+    earlier_image = tmp_path / 'DJI_20260928150001_0002_D.JPG'
+    earlier_image.touch()
+    photo['image'] = str(earlier_image)
+    with pytest.raises(ValueError, match='strict source capture order'):
+        build.validate_plan(edit, 'music')
+
+
+def test_saving_mixed_plan_keeps_photo_paths_without_inventing_cuts_dirs(tmp_path):
+    image = tmp_path / 'DJI_20261005155355_0054_D.JPG'
+    photo = dict(media_type='photo', image=str(image), start_frame=0, end_frame=90,
+                 scene_id=1, scene_group='cows_photo', capture_epoch=100,
+                 rotation=False)
+    edit = dict(timeline=[photo], track=None)
+    saved = build.save_plan(edit, tmp_path / 'mixed.mp4')
+    assert saved.exists()
+    assert photo['image'] == str(image)
+    assert 'cuts_dir' not in photo
