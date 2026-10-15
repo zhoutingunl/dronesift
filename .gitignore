@@ -1,0 +1,24 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Test caches
+.pytest_cache/
+.coverage*
+/coverage.xml
+/coverage.json
+/htmlcov/
+
+# Virtual environments
+.venv
+
+# Local footage validation artifacts
+/validation/
+/output/
+
+# Local soundtracks used for montage experiments
+/music/

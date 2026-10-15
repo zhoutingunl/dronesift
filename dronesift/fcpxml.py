@@ -5,6 +5,7 @@ and the NLE treats dronesift output like a normal edit.
 """
 import os
 from fractions import Fraction
+from pathlib import Path
 from xml.etree import ElementTree as ET
 from xml.dom import minidom
 
@@ -36,7 +37,7 @@ def write(items, video, path, fps):
     if fmt_name: fmt_attrs['name'] = fmt_name
     ET.SubElement(res, 'format', fmt_attrs)
     name = os.path.splitext(os.path.basename(video))[0]
-    src = 'file://' + os.path.abspath(video).replace(' ', '%20')
+    src = Path(video).resolve().as_uri()
     ET.SubElement(res, 'asset', dict(id='a1', name=name, src=src, format='r1', hasVideo='1',
                                      audioRate='48000', audioChannels='2'))
     lib = ET.SubElement(root, 'library')
@@ -53,7 +54,7 @@ def write(items, video, path, fps):
                              note=f"{i.get('label', '')} {i['duration']:.1f}s")
         off += nfr
     xml = minidom.parseString(ET.tostring(root, encoding='unicode')).toprettyxml(indent='  ')
-    with open(path, 'w') as fh:
+    with open(path, 'w', encoding='utf-8') as fh:
         fh.write(xml)
     return path
 

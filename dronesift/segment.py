@@ -1,7 +1,7 @@
 """Fuse telemetry (djmd) and optical-flow motion into labelled stable/continuous segments."""
 import csv, json, math
 import numpy as np
-from scipy.ndimage import gaussian_filter1d, median_filter, uniform_filter1d
+from scipy.ndimage import gaussian_filter1d, median_filter, uniform_filter1d, maximum_filter1d, binary_dilation
 
 FPS = 59.94
 
@@ -41,7 +41,7 @@ def aligned_tel(tel, n, fps):
     return cols, np.arange(n) < m   # no usable pts: old index alignment, last value extended
 
 def features(tel, flow, fps=FPS, tel_sigma_s=0.5, vis_sigma_s=1.0, hf_sigma_s=0.15, rev_amp=25.0):
-    """Return dict of per-frame feature arrays (length = len(flow)) plus the 'tel_ok' coverage mask."""
+    """Per-frame measurements, telemetry coverage, and the source FPS."""
     n = len(flow)
     s_t = tel_sigma_s * fps; s_v = vis_sigma_s * fps; s_h = hf_sigma_s * fps
     f = {}
@@ -58,9 +58,22 @@ def features(tel, flow, fps=FPS, tel_sigma_s=0.5, vis_sigma_s=1.0, hf_sigma_s=0.
     gyaw = gaussian_filter1d(_unwrap_deg(A['g_yaw']), s_t)
     gpitch = gaussian_filter1d(A['g_pitch'], s_t)
     f['g_yaw'] = gyaw; f['g_pitch'] = gpitch
-    f['yaw_rate'] = _deriv(gyaw, fps); f['pitch_rate'] = _deriv(gpitch, fps)
+    # Filter angular velocity rather than differentiating reflected angle ends:
+    # a constant pan must remain constant right up to both source boundaries.
+    angles = {axis: median_filter(_unwrap_deg(A['g_' + axis]), size=3, mode='nearest')
+              for axis in ('yaw', 'pitch', 'roll')}
+    f['yaw_rate'] = gaussian_filter1d(_deriv(angles['yaw'], fps), s_t, mode='nearest')
+    f['pitch_rate'] = gaussian_filter1d(_deriv(angles['pitch'], fps), s_t, mode='nearest')
     f['yaw_acc'] = np.abs(_deriv(f['yaw_rate'], fps)); f['pitch_acc'] = np.abs(_deriv(f['pitch_rate'], fps))
     f['ac_yaw_rate'] = _deriv(gaussian_filter1d(_unwrap_deg(A['ac_yaw']), s_t), fps)
+    # A stick correction need not reverse direction. Compare a responsive angular
+    # velocity with its local trajectory: a uniform ramp has virtually no residual.
+    # Smooth first, then differentiate, to avoid amplifying quantised telemetry.
+    for axis in ('yaw', 'pitch', 'roll'):
+        rate = gaussian_filter1d(_deriv(angles[axis], fps), 0.12 * fps, mode='nearest')
+        f[axis + '_rate_fast'] = rate
+        f[axis + '_correction'] = np.abs(rate - gaussian_filter1d(rate, 0.8 * fps))
+    f['fps'] = fps
     # velocity in camera frame: forward (along gimbal yaw) and lateral (right positive)
     cam_yaw = gaussian_filter1d(_unwrap_deg(A['ac_yaw']), s_t)   # gimbal yaw has a bias vs compass; pan range is small
     rel = np.radians(_wrap_deg(f['track'] - _wrap_deg(cam_yaw)))
@@ -76,20 +89,30 @@ def features(tel, flow, fps=FPS, tel_sigma_s=0.5, vis_sigma_s=1.0, hf_sigma_s=0.
     has_med = 'mdx' in flow[0]
     dx, dy, da, ds = (_col(flow, k) * fps for k in ('dx', 'dy', 'da', 'ds'))
     jdx, jdy = ((_col(flow, 'mdx') * fps, _col(flow, 'mdy') * fps) if has_med else (dx, dy))   # median flow: robust to parallax
+    f['horizontal_motion_correction'] = np.abs(
+        gaussian_filter1d(jdx, 0.12 * fps) - gaussian_filter1d(jdx, 0.8 * fps))
+    f['motion_correction'] = np.hypot(
+        gaussian_filter1d(jdx, 0.12 * fps) - gaussian_filter1d(jdx, 0.8 * fps),
+        gaussian_filter1d(jdy, 0.12 * fps) - gaussian_filter1d(jdy, 0.8 * fps))
     ok = _col(flow, 'n_tracks') >= 20
+    # Frame zero has no predecessor, hence no optical flow. It is not a bad
+    # image and must not force a whole GOP off the beginning of a smooth video.
+    if n > 1 and ok[1]: ok[0] = True
     w = 640
     for name, raw in (('dx', dx), ('dy', dy), ('da', da), ('ds', ds)):
         f[name + '_raw'] = raw; f[name + '_sm'] = gaussian_filter1d(raw, s_v)
+    f['rotation_correction'] = np.abs(gaussian_filter1d(da, 0.12 * fps)
+                                     - gaussian_filter1d(da, 0.8 * fps)) * w / 2
     jit = np.sqrt((jdx - gaussian_filter1d(jdx, s_h))**2 + (jdy - gaussian_filter1d(jdy, s_h))**2
                   + ((da - gaussian_filter1d(da, s_h)) * w / 2)**2 * (0 if has_med else 1))
     jit[~ok] = np.nan
     win = max(3, int(0.5 * fps) | 1)
-    fill = np.nanmax(jit**2) if np.isfinite(np.nanmax(jit**2)) else 0
-    jit2 = np.nan_to_num(jit**2, nan=fill)
+    valid = np.isfinite(jit)
+    jit2 = np.interp(np.arange(n), np.flatnonzero(valid), jit[valid]**2) if valid.any() else np.zeros(n)
     f['jitter'] = jit; f['jitter_rms'] = np.sqrt(median_filter(jit2, size=win))
     # short-window rms: a 0.1-0.3 s shake burst (manual dial snap) is diluted below jitter_rms
     # by the 0.5 s median filter, but clearly visible; single-frame flow glitches are not (yet)
-    f['jitter_burst'] = np.sqrt(uniform_filter1d(jit2, max(3, int(0.15 * fps) | 1)))
+    f['jitter_burst'] = np.sqrt(np.maximum(0, uniform_filter1d(jit2, max(3, int(0.15 * fps) | 1))))
     msm = gaussian_filter1d(np.hypot(jdx, jdy), s_v)
     f['motion_px'] = msm + np.abs(f['da_sm']) * w / 2 + np.abs(f['ds_sm']) * w / 2     # px/s
     f['motion_acc'] = np.abs(_deriv(f['motion_px'], fps))                               # px/s^2
@@ -97,7 +120,6 @@ def features(tel, flow, fps=FPS, tel_sigma_s=0.5, vis_sigma_s=1.0, hf_sigma_s=0.
     # (pan right... then left, push decaying into a drift back) reads as contradictory motion
     # even at low frequency, where hf_flip cannot see it. Rotation is exempt: orbit direction
     # changes are choreographed moves. Frames near such a crossing are vetoed.
-    from scipy.ndimage import maximum_filter1d
     rev = np.zeros(n, bool)
     rwin = int(2.5 * fps) | 1
     for c in (f['dx_sm'], f['dy_sm'], f['ds_sm'] * w / 2):
@@ -131,22 +153,25 @@ def features(tel, flow, fps=FPS, tel_sigma_s=0.5, vis_sigma_s=1.0, hf_sigma_s=0.
 
 DEFAULT_THR = dict(
     jitter_px=30.0,       # rms image motion above ~1 Hz, px/s at 640px width (≈0.5 px/frame @60fps)
-    hf_flip=0.25,         # perceptual shake gate: image motion only counts as shake when it REVERSES
-    motion_rev_amp=25.0,  # slow component reversal (pan/track/zoom changing sign mid-shot, px/s at
-                          # 640 width, ±2.5 s envelope): multiple contradictory changes read as
-                          # unstable even when each alone would be regular. Rotation is exempt.
-                          # (>= this fraction of frames flip hf direction in 0.1 s). A violent but
-                          # never-reversing excursion (whip tilt, MasterShots moves) is an intentional
-                          # move. 0 disables the gate (legacy behaviour).
+    hf_flip=0.25,         # direction-flip gate for image-amplitude tests; 0 explicitly disables it
+    motion_rev_amp=0.0,   # optional legacy component-sign veto; smooth reversals are kept by default
     jitter_spike_px=45.0, # 0.15 s rms shake burst (manual dial snap, ≈0.75 px/frame); lasts >= spike_min_frames
-    spike_min_frames=3, spike_pad_s=0.35,  # min burst length to act on; pad each side so the hole defeats merge_gap_s
+    spike_min_frames=3, spike_pad_s=0.35,  # minimum burst length, then a settling margin on each side
     acc_h=1.2, acc_z=1.0, # m/s^2, along-track / vertical acceleration (stick inputs); centripetal accel is not counted
     accel_veto_rel=0.5,   # ...and only vetoes when image motion accel is above this fraction of its threshold
     yaw_acc=8.0, pitch_acc=8.0,  # deg/s^2, gimbal angular acceleration (for orbits, relaxed to acc_h / radius)
+    yaw_correction_dps=6.0,  # fast yaw rate minus its 0.8 s trajectory, catches one-way stick steps
+    yaw_nudge_dps=2.0, yaw_nudge_rel=0.5, yaw_nudge_motion_px=10.0,  # small isolated yaw step, with horizontal image evidence
+    yaw_nudge_episode_s=5.0, yaw_nudge_gap_s=0.25, yaw_nudge_quiet_dps=0.5,  # grow confirmed short gestures through their settling tails
+    pitch_return_dps=1.5, pitch_return_rel=0.35,  # brief tilt-and-return, relative to the local gesture
+    roll_correction_dps=1.5,  # roll telemetry must agree with optical rotation, not just parallax
+    correction_motion_px=5.0,  # corroborating median image-motion residual, px/s @640
+    brake_yaw_acc=12.0, brake_motion_acc=40.0,  # sudden camera slowdown corroborated by image motion
+    disturbance_min_s=0.10, disturbance_pad_s=0.35,  # sustained evidence + settling margin; never merged over
     motion_acc=60.0,      # px/s^2, change of low-pass image motion speed (start/stop of moves)
     motion_acc_rel=0.5,   # ... or 50 %/s of current image speed, whichever is larger
     expo_jump=0.3,        # stops of exposure change within 0.5 s (auto-exposure steps are ~0.15)
-    consist=0.6, consist_floor=8.0,  # reject frames whose 2 s image-motion direction consistency < consist while mean motion > floor px/s (slow wobble)
+    consist=0.6, consist_floor=8.0,  # low direction consistency must agree with short-timescale oscillation
     blur_drop=0.45,       # sharpness relative to local median
     min_len_s=3.0, merge_gap_s=0.5, trim_s=0.3,
     label_min_s=3.0, label_filter_s=2.0, climb_rate=1.0,  # sub-moves shorter than label_min_s are not named; labels mode-filtered over label_filter_s
@@ -158,7 +183,7 @@ DEFAULT_THR = dict(
 )
 
 def base_labels(f, thr, fps=FPS):
-    """Per-frame base motion label from telemetry; mode-filtered over 1 s to suppress flicker."""
+    """Per-frame motion labels; mode-filtered over label_filter_s to suppress flicker."""
     n = len(f['speed3']); labels = []
     for i in range(n):
         sp, sh, vf, vl, vz = f['speed3'][i], f['speed_h'][i], f['v_fwd'][i], f['v_lat'][i], f['vz'][i]
@@ -187,20 +212,93 @@ def spike_mask(f, thr, fps=FPS):
     """Frames hit by a visible shake burst: 0.15 s rms above jitter_spike_px for >= spike_min_frames
     AND reversing (hf_flip), padded by spike_pad_s so the hole outlasts merge_gap_s and splits the segment."""
     from scipy.ndimage import binary_dilation, binary_erosion
-    hot = (f['jitter_burst'] > thr['jitter_spike_px']) & (f['hf_flip'] > thr['hf_flip'])
+    shake = (f['hf_flip'] > thr['hf_flip']) if thr['hf_flip'] > 0 else np.ones(len(f['hf_flip']), bool)
+    hot = (f['jitter_burst'] > thr['jitter_spike_px']) & shake
     hot = binary_erosion(hot, structure=np.ones(max(1, int(thr['spike_min_frames']))), border_value=1)
     pad = int(thr['spike_pad_s'] * fps)
     return binary_dilation(hot, structure=np.ones(2 * pad + 1)) if pad else hot
 
-def keep_mask(f, thr, labels=None):
+def _sustained(mask, seconds, fps):
+    """Keep entire qualifying events, not just an eroded centre (which loses boundaries)."""
+    out = np.zeros(len(mask), bool)
+    minimum = max(1, int(math.ceil(seconds * fps)))
+    for a, b, value in _runs(mask):
+        if value and b - a + 1 >= minimum: out[a:b + 1] = True
+    return out
+
+def _yaw_nudge_episodes(seed, rate, peak, thr, fps):
+    """Cover a confirmed short correction from onset to rest, not just its peaks.
+
+    Join brief pauses inside a left-right gesture. Grow only compact gestures:
+    an active pan lasting longer than the limit remains a continuous trajectory,
+    so a local correction must not erase that entire move.
+    """
+    if not seed.any(): return seed
+    active = np.abs(rate) > np.maximum(thr['yaw_nudge_quiet_dps'], 0.1 * peak)
+    episodes = []
+    for a, b, value in _runs(active):
+        if not value: continue
+        if episodes and (a - episodes[-1][1] - 1) / fps <= thr['yaw_nudge_gap_s']:
+            episodes[-1][1] = b
+        else: episodes.append([a, b])
+    out = seed.copy()
+    for a, b in episodes:
+        if (b - a + 1) / fps <= thr['yaw_nudge_episode_s'] and seed[a:b + 1].any():
+            out[a:b + 1] = True
+    return out
+
+def disturbance_masks(f, thr, fps=FPS):
+    """Independent, explainable camera disturbances; all times use the source FPS."""
+    n = len(f['speed3']); zero = np.zeros(n)
+    correction = (f.get('yaw_correction', zero) > thr['yaw_correction_dps']) if thr['yaw_correction_dps'] > 0 else zero.astype(bool)
+    # A subtle lateral reframe can be clearly visible in a steady push despite
+    # falling below the severe yaw threshold. Require BOTH a departure from the
+    # local angular trajectory and horizontal image motion. A fast vertical tilt
+    # can perturb Euler yaw, but its large vertical flow is not lateral evidence.
+    win = max(1, int(4.0 * fps) | 1)
+    yaw_peak = maximum_filter1d(np.abs(f.get('yaw_rate_fast', zero)), win)
+    yaw_residual = f.get('yaw_correction', zero)
+    yaw_nudge = (yaw_residual > thr['yaw_nudge_dps']) \
+        & (yaw_residual > thr['yaw_nudge_rel'] * yaw_peak) \
+        & (f.get('horizontal_motion_correction', zero) > thr['yaw_nudge_motion_px'])
+    # A fast orbit can be smooth. Reject a brake only when both the camera's
+    # angular deceleration and the image's slowdown substantiate the event.
+    braking = (f['yaw_rate'] * _deriv(f['yaw_rate'], fps) < 0) \
+        & (f['yaw_acc'] > thr['brake_yaw_acc']) & (f['motion_acc'] > thr['brake_motion_acc']) \
+        & (_deriv(f['motion_px'], fps) < 0)
+    pitch = f.get('pitch_rate_fast', zero)
+    pos = maximum_filter1d(np.maximum(pitch, 0), win)
+    neg = maximum_filter1d(np.maximum(-pitch, 0), win)
+    residual = f.get('pitch_correction', zero)
+    pitch_return = (residual > thr['pitch_return_dps']) & (pos > thr['pitch_return_dps']) \
+        & (neg > thr['pitch_return_dps']) & (residual > thr['pitch_return_rel'] * np.maximum(pos, neg)) \
+        & (f.get('motion_correction', zero) > thr['correction_motion_px'])
+    roll = (f.get('roll_correction', zero) > thr['roll_correction_dps']) \
+        & (f.get('rotation_correction', zero) > thr['correction_motion_px'])
+    masks = {'yaw_correction': correction, 'yaw_nudge': yaw_nudge, 'pitch_return': pitch_return,
+             'roll_correction': roll, 'camera_brake': braking}
+    pad = int(math.ceil(thr['disturbance_pad_s'] * fps))
+    for name, mask in masks.items():
+        mask = _sustained(mask, thr['disturbance_min_s'], fps)
+        if name == 'yaw_nudge':
+            mask = _yaw_nudge_episodes(mask, f.get('yaw_rate_fast', zero), yaw_peak, thr, fps)
+        masks[name] = binary_dilation(mask, structure=np.ones(2 * pad + 1)) if pad else mask
+    masks['shake_burst'] = spike_mask(f, thr, fps)
+    return masks
+
+def keep_mask(f, thr, labels=None, fps=None):
+    fps = f.get('fps', FPS) if fps is None else fps
     n = len(f['speed3'])
     orbit = np.zeros(n, bool) if labels is None else np.char.startswith(labels.astype(str), 'orbit')
     # in an orbit yaw rate = v / r, so a legal along-track acceleration implies yaw accel of acc_h / r
     yaw_thr = np.where(orbit, np.maximum(thr['yaw_acc'], np.degrees(thr['acc_h'] / np.maximum(f['radius'], 1.0))), thr['yaw_acc'])
     m_thr = np.maximum(thr['motion_acc'], thr['motion_acc_rel'] * f['motion_px'])
-    wobble = (f['consist'] < thr['consist']) & (f['vmag'] > thr['consist_floor'])
-    # only reversing image motion counts as shake; a violent coherent excursion is an intentional move
-    shake = f['hf_flip'] > thr['hf_flip']
+    # This gate applies to the older image-amplitude tests. Angular trajectory
+    # corrections have their own evidence and need not reverse image direction.
+    shake = (f['hf_flip'] > thr['hf_flip']) if thr['hf_flip'] > 0 else np.ones(n, bool)
+    # A smooth U-turn also has low direction consistency. Low consistency alone
+    # cannot establish shake; require short-timescale image irregularity.
+    wobble = (f['consist'] < thr['consist']) & (f['vmag'] > thr['consist_floor']) & shake
     image_ok = ((f['jitter_rms'] < thr['jitter_px']) & (f['motion_acc'] < m_thr) | ~shake) \
         & (f['blur_drop'] > thr['blur_drop']) & f['flow_ok'] & ~wobble
     gimbal_ok = ((f['yaw_acc'] < yaw_thr) & (f['pitch_acc'] < thr['pitch_acc'])) | ~shake
@@ -211,7 +309,21 @@ def keep_mask(f, thr, labels=None):
     keep = image_ok & gimbal_ok & ~accel_veto
     keep &= (f['expo_jump'] < thr['expo_jump']) & (np.abs(np.gradient(f['ev'])) == 0)   # exposure jumps / EV dial changes
     keep &= f['tel_ok']                                                                 # frames without telemetry cannot be judged
-    keep &= ~spike_mask(f, thr)                                                         # shake bursts must break the segment
+    disturbances = disturbance_masks(f, thr, fps)
+    # Moderate oscillation below the burst threshold is still an observed event,
+    # not a weak measurement gap. Preserve it even with a large merge-gap setting.
+    oscillation = shake & ((f['jitter_rms'] >= thr['jitter_px']) | (f['motion_acc'] >= m_thr)
+                           | ~gimbal_ok | wobble)
+    oscillation = _sustained(oscillation, thr['disturbance_min_s'], fps)
+    pad = int(math.ceil(thr['disturbance_pad_s'] * fps))
+    disturbances['image_oscillation'] = binary_dilation(oscillation, structure=np.ones(2 * pad + 1)) if pad else oscillation
+    hard = ~f['tel_ok']
+    for mask in disturbances.values(): hard = hard | mask
+    # Store exclusions separately: segment assembly may bridge weak isolated
+    # measurements, but it must never resurrect an observed camera disturbance.
+    f['hard_reject'] = hard
+    f['disturbances'] = disturbances
+    keep &= ~hard
     if thr.get('motion_rev_amp', 0) > 0:                                                # slow contradictory component changes
         keep &= ~(f['motion_reversal'] if 'motion_reversal' in f
                   else np.zeros(len(f['speed3']), bool))
@@ -219,7 +331,7 @@ def keep_mask(f, thr, labels=None):
 
 def classify_frames(f, thr, fps=FPS):
     labels = base_labels(f, thr, fps)
-    return keep_mask(f, thr, labels), labels
+    return keep_mask(f, thr, labels, fps), labels
 
 def describe(f, sl, base, thr):
     """Final label for a run from its mean motion. base may carry a '+climb' / '+descend' suffix."""
@@ -266,13 +378,18 @@ def segments(f, keep, labels, thr, fps=FPS):
     if thr.get('split_labels'):
         runs = [[i, j] for i, j, v in _runs(np.where(keep, labels, '')) if v != '']
     merged = []
+    hard = f.get('hard_reject', np.zeros(len(keep), bool))
     for a, b in runs:
-        if merged and (a - merged[-1][1]) / fps <= thr['merge_gap_s'] and (not thr.get('split_labels') or labels[a] == labels[merged[-1][0]]):
+        gap_start = merged[-1][1] + 1 if merged else 0
+        if merged and (a - gap_start) / fps <= thr['merge_gap_s'] and not hard[gap_start:a].any() and (not thr.get('split_labels') or labels[a] == labels[merged[-1][0]]):
             merged[-1][1] = b
         else: merged.append([a, b])
     trim = int(thr['trim_s'] * fps); out = []
     for a, b in merged:
-        a2, b2 = a + trim, b - trim
+        # Safe source endpoints need no settling trim. Interior boundaries still
+        # get handles so a retained clip starts after, and ends before, a correction.
+        a2 = a + trim if a > 0 else a
+        b2 = b - trim if b < len(keep) - 1 else b
         if (b2 - a2 + 1) / fps < thr['min_len_s']: continue
         sl = slice(a2, b2 + 1)
         seq = _label_sequence(f, labels, a2, b2, thr, fps)
@@ -290,7 +407,7 @@ def segments(f, keep, labels, thr, fps=FPS):
 def run(tel_csv, flow_csv, out_json, thr=None, fps=FPS):
     thr = {**DEFAULT_THR, **(thr or {})}
     tel = list(csv.DictReader(open(tel_csv))); flow = list(csv.DictReader(open(flow_csv)))
-    f, n = features(tel, flow, fps)
+    f, n = features(tel, flow, fps, rev_amp=thr['motion_rev_amp'])
     keep, labels = classify_frames(f, thr, fps)
     segs = segments(f, keep, labels, thr, fps)
     with open(out_json, 'w') as fh: json.dump(dict(fps=fps, frames=n, thresholds=thr, segments=segs), fh, indent=1)

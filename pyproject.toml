@@ -11,6 +11,7 @@ dependencies = [
     "numpy>=2.5.3",
     "opencv-python-headless>=5.0.0.93",
     "scipy>=1.18.1",
+    "tzdata>=2024.1",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -31,7 +32,16 @@ dronesift-gui = "dronesift.gui.main:main"
 gui = ["PySide6>=6.6"]
 
 [dependency-groups]
-dev = ["pytest>=8.3"]
+dev = ["pytest>=8.3", "pytest-cov>=7.0"]
+
+[tool.coverage.run]
+source = ["dronesift"]
+branch = true
+patch = ["subprocess"]
+
+[tool.coverage.report]
+show_missing = true
+precision = 2
 
 [build-system]
 requires = ["setuptools>=77"]

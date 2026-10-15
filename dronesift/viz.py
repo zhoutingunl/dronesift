@@ -22,9 +22,16 @@ def thumb_sprite(video, duration, out_jpg, max_thumbs=200, hwaccel='auto'):
 
 def build(video, tel_csv, flow_csv, seg_json, out_html, hz=10.0, hwaccel='auto'):
     from .segment import features, classify_frames, aligned_tel
-    d = json.load(open(seg_json)); fps = d['fps']; thr = d['thresholds']; segs = d['segments']
-    tel = list(csv.DictReader(open(tel_csv))); flow = list(csv.DictReader(open(flow_csv)))
-    f, n = features(tel, flow, fps); keep, labels = classify_frames(f, thr, fps)
+    with open(seg_json, encoding='utf-8') as fh:
+        d = json.load(fh)
+    fps = d['fps']; thr = d['thresholds']; segs = d['segments']
+    with open(tel_csv, encoding='utf-8', newline='') as fh:
+        tel = list(csv.DictReader(fh))
+    with open(flow_csv, encoding='utf-8', newline='') as fh:
+        flow = list(csv.DictReader(fh))
+    from .segment import DEFAULT_THR
+    thr = {**DEFAULT_THR, **thr}
+    f, n = features(tel, flow, fps, rev_amp=thr['motion_rev_amp']); keep, labels = classify_frames(f, thr, fps)
     A, _ = aligned_tel(tel, n, fps)
     lat, lon = A['lat'], A['lon']
     R = 6371000.0; lat0 = math.radians(lat.mean())
@@ -53,10 +60,12 @@ def build(video, tel_csv, flow_csv, seg_json, out_html, hz=10.0, hwaccel='auto')
                            yaw=round(s['yaw_rate_dps'], 1), radius=s.get('radius_m')) for s in segs])
     html = TEMPLATE.replace('__DATA__', json.dumps(data, separators=(',', ':'))).replace('__META__', json.dumps(meta, ensure_ascii=False))
     html = html.replace('__TITLE__', meta['name'] + ' 轨迹')
-    with open(out_html, 'w') as fh: fh.write(html)
+    with open(out_html, 'w', encoding='utf-8') as fh: fh.write(html)
     return out_html
 
-TEMPLATE = r'''<title>__TITLE__</title>
+TEMPLATE = r'''<!doctype html>
+<meta charset="utf-8">
+<title>__TITLE__</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
 <style>
 /* layout: one column; 3D view on top, control strip, stacked shared-x timelines below */
