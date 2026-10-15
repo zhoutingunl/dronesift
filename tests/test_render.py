@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from dronesift.render import frame_timeline, render_montage
+from dronesift import render
 
 
 def _rows(source):
@@ -15,6 +16,28 @@ def _rows(source):
     return [dict(video=str(source), start=0, end=1, duration=0.115),
             dict(video=str(source), start=1, end=2, duration=0.115),
             dict(video=str(source), start=2, end=3, duration=0.115)]
+
+
+def test_renderer_rejects_unassessed_or_over_limit_speed_before_encoding(tmp_path, monkeypatch,
+                                                                        playback_profile):
+    source = tmp_path / 'source.mp4'
+    source.touch()
+    output = tmp_path / 'blocked.mp4'
+    monkeypatch.setattr(render, 'music_info', lambda _: dict(duration=2))
+    def must_not_encode(*args, **kwargs):
+        raise AssertionError('unsupported acceleration reached encoder setup')
+    monkeypatch.setattr(render, 'probe_acceleration', must_not_encode)
+    row = dict(video=str(source), source_start=0, source_end=3.5,
+               start_frame=0, end_frame=60, playback_speed=1.5)
+    with pytest.raises(ValueError, match='requires a playback_speed_profile'):
+        render_montage([row], 'unused.wav', output)
+    row.update(max_playback_speed=1.25, playback_speed_profile=playback_profile(0, 3, maximum=1.25))
+    with pytest.raises(ValueError, match='exceeds'):
+        render_montage([row], 'unused.wav', output)
+    row.update(max_playback_speed=2, playback_speed_profile=playback_profile(0, 3.5))
+    with pytest.raises(ValueError, match='exact consumed source window'):
+        render_montage([row], 'unused.wav', output)
+    assert not output.exists()
 
 
 def test_round_absolute_boundaries_without_per_shot_drift(tmp_path):
@@ -189,7 +212,7 @@ def test_reverse_exact_source_color_sequence_keeps_audio_forward_and_fade_at_end
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg") or not shutil.which("ffprobe"), reason="requires ffmpeg")
-def test_actual_mixed_speeds_preserve_cuts_music_and_end_fade(tmp_path):
+def test_actual_mixed_speeds_preserve_cuts_music_and_end_fade(tmp_path, playback_profile):
     # Each two source frames increase brightness by one.  Decoded output can
     # therefore establish which real source times 1x, 1.5x and 2x sampled.
     width, height, source_fps = 96, 64, 60
@@ -217,6 +240,11 @@ def test_actual_mixed_speeds_preserve_cuts_music_and_end_fade(tmp_path):
                  start_frame=30, end_frame=60),
             dict(video=str(source), source_start=4, source_end=6.4, playback_speed=2,
                  start_frame=60, end_frame=90)]
+    for row in rows[1:]:
+        # This test verifies actual speed/timing; quality estimation is tested
+        # separately. Assess only consumed frames, not the unused source reserve.
+        row['playback_speed_profile'] = playback_profile(
+            row['source_start'], row['source_start'] + row['playback_speed'])
     output = tmp_path / "mixed.mp4"
     report = render_montage(rows, music, output, tmp_path / "work", width=width, height=height,
                             use_hardware=False, end_fade=0.2)

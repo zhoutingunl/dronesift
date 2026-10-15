@@ -1,5 +1,5 @@
 """Fuse telemetry (djmd) and optical-flow motion into labelled stable/continuous segments."""
-import csv, json, math
+import copy, csv, json, math
 import numpy as np
 from scipy.ndimage import gaussian_filter1d, median_filter, uniform_filter1d, maximum_filter1d, binary_dilation
 
@@ -89,6 +89,10 @@ def features(tel, flow, fps=FPS, tel_sigma_s=0.5, vis_sigma_s=1.0, hf_sigma_s=0.
     has_med = 'mdx' in flow[0]
     dx, dy, da, ds = (_col(flow, k) * fps for k in ('dx', 'dy', 'da', 'ds'))
     jdx, jdy = ((_col(flow, 'mdx') * fps, _col(flow, 'mdy') * fps) if has_med else (dx, dy))   # median flow: robust to parallax
+    if has_med and 'mdy' in flow[0]:
+        # Preserve measured signed median translation for playback assessment;
+        # the affine fit is not interchangeable evidence when its fit jumps.
+        f['mdx_raw'], f['mdy_raw'] = jdx, jdy
     f['horizontal_motion_correction'] = np.abs(
         gaussian_filter1d(jdx, 0.12 * fps) - gaussian_filter1d(jdx, 0.8 * fps))
     f['motion_correction'] = np.hypot(
@@ -372,6 +376,44 @@ def _label_sequence(f, labels, a, b, thr, fps):
     if len(seq) > 1 and (seq[0][2] - seq[0][1] + 1) / fps < thr['label_min_s']: seq = seq[1:]
     return [d for d, _, _ in seq]
 
+def annotate_playback_speeds(segs, f, fps=FPS, *, output_fps=30, overwrite=False):
+    """Attach advisory playback limits without changing any selection boundary.
+
+    Feature arrays are reused for every segment. Existing profiles are retained
+    so an older JSON report can fill only missing annotations from its caches.
+    """
+    from .shot_quality import playback_speed_profile
+    finite_number = lambda value: (isinstance(value, (int, float))
+                                   and not isinstance(value, bool) and math.isfinite(value))
+    for s in segs:
+        profile = s.get('playback_speed_profile')
+        complete = (isinstance(profile, dict) and profile.get('schema_version') == 1
+                    and not isinstance(profile.get('schema_version'), bool)
+                    and profile.get('method') == 'motion_speed_v1'
+                    and 'max_playback_speed' in profile
+                    and (profile['max_playback_speed'] is None
+                         or finite_number(profile['max_playback_speed']) and profile['max_playback_speed'] >= 0)
+                    and finite_number(profile.get('output_fps')) and profile['output_fps'] > 0
+                    and (output_fps is None or profile['output_fps'] == output_fps)
+                    and finite_number(profile.get('source_start'))
+                    and finite_number(profile.get('source_end'))
+                    and math.isclose(profile['source_start'], s['start'], rel_tol=0, abs_tol=1e-6)
+                    and math.isclose(profile['source_end'], s['end'], rel_tol=0, abs_tol=1e-6))
+        if overwrite or not complete:
+            profile = playback_speed_profile(f, fps, s['start'], s['end'], output_fps=30 if output_fps is None else output_fps)
+            s['playback_speed_profile'] = profile
+        s['max_playback_speed'] = profile.get('max_playback_speed')
+    return segs
+
+def playback_speed_text(profile):
+    """A missing assessment must never read as unlimited acceleration."""
+    maximum = profile.get('max_playback_speed') if isinstance(profile, dict) else None
+    if maximum is None:
+        return '待评估'
+    if maximum <= 0:
+        return '无通过档位'
+    return f'≤{maximum:g}×'
+
 def segments(f, keep, labels, thr, fps=FPS):
     """Continuous kept runs -> merged across short gaps, trimmed, min-length filtered, labelled by move sequence."""
     runs = [[i, j] for i, j, v in _runs(keep) if v]
@@ -402,15 +444,16 @@ def segments(f, keep, labels, thr, fps=FPS):
                         motion_px=float(f['motion_px'][sl].mean()),
                         radius_m=(float(np.abs(f['v_lat'][sl]).mean() / max(math.radians(abs(f['yaw_rate'][sl].mean())), 1e-6))
                                   if base == 'orbit' else None)))
-    return out
+    return annotate_playback_speeds(out, f, fps)
 
 def run(tel_csv, flow_csv, out_json, thr=None, fps=FPS):
     thr = {**DEFAULT_THR, **(thr or {})}
-    tel = list(csv.DictReader(open(tel_csv))); flow = list(csv.DictReader(open(flow_csv)))
+    with open(tel_csv, encoding='utf-8', newline='') as fh: tel = list(csv.DictReader(fh))
+    with open(flow_csv, encoding='utf-8', newline='') as fh: flow = list(csv.DictReader(fh))
     f, n = features(tel, flow, fps, rev_amp=thr['motion_rev_amp'])
     keep, labels = classify_frames(f, thr, fps)
     segs = segments(f, keep, labels, thr, fps)
-    with open(out_json, 'w') as fh: json.dump(dict(fps=fps, frames=n, thresholds=thr, segments=segs), fh, indent=1)
+    with open(out_json, 'w', encoding='utf-8') as fh: json.dump(dict(fps=fps, frames=n, thresholds=thr, segments=segs), fh, indent=1)
     return f, keep, labels, segs
 
 def hms(t):
@@ -472,7 +515,13 @@ def shots(segs, f, labels, thr, fps=FPS):
             p = out[-1]; out[-1] = _shot(f, labels, p['start_frame'], b, fps, si)
         else:
             out.append(_shot(f, labels, cur, b, fps, si))
-    for i, s in enumerate(out): s['shot'] = i
+    for i, s in enumerate(out):
+        s['shot'] = i
+        # Keep the parent's assessment as catalog advice. Its bounds make clear
+        # that acceleration of this sub-shot still needs an exact-window check.
+        parent = segs[s['segment']]
+        s['playback_speed_profile'] = copy.deepcopy(parent.get('playback_speed_profile'))
+        s['max_playback_speed'] = parent.get('max_playback_speed')
     return out
 
 if __name__ == '__main__':

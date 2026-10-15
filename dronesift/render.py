@@ -14,6 +14,8 @@ from fractions import Fraction
 from numbers import Real
 from pathlib import Path
 
+from .playback import validate_playback_speed
+
 
 def _run(args):
     result = subprocess.run(args, capture_output=True, text=True)
@@ -90,6 +92,8 @@ def frame_timeline(rows, music_duration, fps=30, *, allow_reverse=False):
         if not math.isfinite(consumed) or end - start + 1e-6 < consumed:
             raise ValueError(f"Shot {i + 1} is too short: source {end - start:.6f}s, "
                              f"output {duration:.6f}s at {speed:g}x requires {consumed:.6f}s")
+        validate_playback_speed(row, source_start=start, source_end=start + consumed,
+                                output_fps=fps)
         video = Path(row["video"]).resolve()
         if not video.is_file():
             raise FileNotFoundError(video)
@@ -218,6 +222,9 @@ def render_montage(rows, music_path, output_path, workdir=None, *, fps=30,
     work.mkdir(parents=True, exist_ok=True)
     music = music_info(music_path)
     timeline = frame_timeline(rows, music["duration"], fps, allow_reverse=allow_reverse)
+    speed_checks = [validate_playback_speed(row,
+        source_start=row['source_consumed_start'], source_end=row['source_consumed_end'],
+        output_fps=fps, require_assessment=True) for row in timeline]
     acceleration = (probe_acceleration(timeline[0]["video"], work, width=width, height=height,
                                        fps=fps, start=timeline[0]["source_start"])
                     if use_hardware else dict(encoder="libx264", decoder=None,
@@ -283,6 +290,8 @@ def render_montage(rows, music_path, output_path, workdir=None, *, fps=30,
                                  source_consumed_start=row["source_consumed_start"],
                                  source_consumed_end=row["source_consumed_end"],
                                  source_consumed_duration=row["source_consumed_duration"],
+                                 max_playback_speed=row.get('max_playback_speed'),
+                                 playback_speed_profile=row.get('playback_speed_profile'),
                                  start_frame=row["start_frame"], end_frame=row["end_frame"],
                                  reversed=row["reversed"]))
         parts.append(part)
@@ -309,6 +318,7 @@ def render_montage(rows, music_path, output_path, workdir=None, *, fps=30,
                   allow_reverse=bool(allow_reverse),
                   reversed_shots=sum(row["reversed"] for row in timeline),
                   accelerated_shots=sum(row["playback_speed"] > 1 for row in timeline),
+                  playback_speed_checks=speed_checks,
                   policy=("explicitly approved reverse stable windows; forward full audio from zero; absolute frame cuts"
                           if any(row["reversed"] for row in timeline) else
                           "forward original stable windows; full audio from zero; absolute frame cuts")

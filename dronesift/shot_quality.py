@@ -13,10 +13,360 @@ from __future__ import annotations
 import math
 import os
 import subprocess
+from fractions import Fraction
 
 import cv2
 import numpy as np
-from scipy.ndimage import gaussian_filter1d
+from scipy.ndimage import gaussian_filter1d, maximum_filter1d, minimum_filter1d
+from scipy.signal import resample_poly, savgol_filter
+
+
+# Advisory limits at the 640-pixel optical-flow measurement width. These are
+# conservative engineering heuristics, not a guarantee of perceptual comfort.
+_SPEED_LIMITS = dict(image_irregular_velocity_px_s=18.0,
+                     image_irregular_acceleration_px_s2=100.0,
+                     image_jerk_px_s3=800.0,
+                     angular_irregular_velocity_deg_s=1.8,
+                     angular_irregular_acceleration_deg_s2=10.0,
+                     angular_jerk_deg_s3=80.0,
+                     image_displacement_px_per_frame=12.0,
+                     angular_displacement_deg_per_frame=0.8)
+_SPEED_VISIBILITY_FLOORS = dict(image=0.5, angular=0.05)
+
+
+def _finite_parameter(value, name, *, positive=False):
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f'{name} must be finite') from None
+    if isinstance(value, (bool, np.bool_)) or not math.isfinite(number):
+        raise ValueError(f'{name} must be finite')
+    if positive and number <= 0:
+        raise ValueError(f'{name} must be positive')
+    return number
+
+
+def _speed_arguments(fps, start, end, output_fps):
+    fps = _finite_parameter(fps, 'fps', positive=True)
+    output_fps = _finite_parameter(output_fps, 'output_fps', positive=True)
+    start = _finite_parameter(start, 'start')
+    end = _finite_parameter(end, 'end')
+    if start < 0 or end <= start:
+        raise ValueError('source window must have 0 <= start < end')
+    if not math.isfinite(end * fps):
+        raise ValueError('source frame bounds must be finite')
+    return fps, start, end, output_fps
+
+
+def _speed_parameter(value):
+    number = _finite_parameter(value, 'playback_speed', positive=True)
+    if not math.isfinite(number * number * number):
+        raise ValueError('playback_speed is too large for finite derivative scaling')
+    return number
+
+
+def _playback_motion_evidence(feats, fps, start, end):
+    """Measure a window once in SOURCE seconds, never from whole-shot means.
+
+    Signed image velocities already have units per second in ``features``.
+    Anti-aliased resampling caps analysis at 30 Hz; polynomial edge handling
+    preserves constant velocity and linear velocity ramps at crop boundaries.
+    A local quadratic velocity trend removes smoothly changing acceleration.
+    A linear trend alone can fit the wrong slope at a curved crop boundary and
+    invent a large residual acceleration; quadratic interpolation avoids that.
+    Actual jerk is measured independently, rather than removed by the trend.
+    The worst 0.12-source-second RMS exposes brief corrections without allowing a
+    long quiet section to dilute them. No sample is nan_to_num'd into evidence.
+    """
+    image_keys = ('dx_raw', 'dy_raw', 'da_raw', 'ds_raw')
+    angular_keys = ('yaw_rate_fast', 'pitch_rate_fast')
+    if not hasattr(feats, 'get'):
+        return dict(status='insufficient', reasons=['missing_motion_evidence'])
+    median_keys = ('mdx_raw', 'mdy_raw')
+    has_median = [feats.get(key) is not None for key in median_keys]
+    if any(has_median):
+        missing = [key for key, present in zip(median_keys, has_median) if not present]
+        if missing:
+            return dict(status='insufficient', reasons=['missing_motion_evidence'],
+                        missing_features=missing)
+        # The fitted similarity's translation can jitter as foreground/background
+        # parallax changes its inlier set. Signed median feature displacement is
+        # the same robust observable used by the original stability gate. Keep
+        # affine rotation AND scale: their real changes must not disappear just
+        # because the median image translation is quiet.
+        image_keys = median_keys + image_keys[2:]
+    required = image_keys + angular_keys
+    missing = [key for key in required if feats.get(key) is None]
+    if missing:
+        return dict(status='insufficient', reasons=['missing_motion_evidence'],
+                    missing_features=missing)
+    if feats.get('roll_rate_fast') is not None:
+        angular_keys += ('roll_rate_fast',)
+    keys = image_keys + angular_keys
+    a = int(math.ceil(start * fps - 1e-7))
+    b = int(math.ceil(end * fps - 1e-7))
+    values = []
+    for key in keys:
+        try:
+            array = np.asarray(feats[key], dtype=float)
+        except (TypeError, ValueError, OverflowError):
+            return dict(status='insufficient', reasons=['invalid_motion_evidence'],
+                        invalid_features=[key])
+        if array.ndim != 1 or b > len(array):
+            return dict(status='insufficient', reasons=['outside_motion_evidence'],
+                        invalid_features=[key])
+        window = array[a:b]
+        if not np.isfinite(window).all():
+            return dict(status='insufficient', reasons=['non_finite_motion_evidence'],
+                        invalid_features=[key])
+        values.append(window)
+    for key in ('flow_ok', 'tel_ok'):
+        if feats.get(key) is None:
+            continue
+        coverage = np.asarray(feats[key])
+        if coverage.ndim != 1 or b > len(coverage):
+            return dict(status='insufficient', reasons=['outside_motion_evidence'],
+                        invalid_features=[key])
+        selected = coverage[a:b]
+        try:
+            covered = np.isfinite(selected).all() and np.all(selected == 1)
+        except TypeError:
+            covered = False
+        if not covered:
+            return dict(status='insufficient', reasons=['unreliable_motion_evidence'],
+                        invalid_features=[key])
+    # Flow sample a describes a-1 -> a, partly outside the chosen window.
+    # Exclude it rather than borrowing an unplayed correction from before it.
+    origin = (a + 1) / fps
+    data = np.column_stack(values)[1:]
+    if fps < 10 or len(data) < 9 or (len(data) - 1) / fps < 0.75:
+        return dict(status='insufficient', reasons=['too_little_temporal_evidence'])
+    # Finite input can overflow resampling, derivatives or squared RMS. Such
+    # measurements are unknown, never invisible-zero evidence.
+    if np.max(np.abs(data)) > np.finfo(float).max ** .25:
+        return dict(status='insufficient', reasons=['motion_evidence_numeric_range'])
+    ratio = Fraction(min(fps, 30.0) / fps).limit_denominator(10000)
+    rate = fps * ratio.numerator / ratio.denominator
+    source_count = len(data)
+    if ratio.numerator != ratio.denominator:
+        data = resample_poly(data, ratio.numerator, ratio.denominator,
+                             axis=0, padtype='line')
+        # resample_poly rounds up; do not analyse an extrapolated end sample.
+        count = int(math.floor((source_count - 1) * rate / fps + 1e-8)) + 1
+        data = data[:count]
+    # Scale affine rotation/expansion into displacement at the image edge.
+    data[:, 2:4] *= 320.0
+
+    def smooth(x, seconds, degree=2, deriv=0):
+        size = max(degree + 2, int(round(seconds * rate)))
+        size += 1 - size % 2
+        size = min(size, len(x) if len(x) % 2 else len(x) - 1)
+        return savgol_filter(x, size, degree, deriv=deriv, delta=1 / rate,
+                             axis=0, mode='interp')
+
+    fine = smooth(data, 0.20)
+    trend = smooth(fine, 0.80, degree=2)
+    residual = fine - trend
+    irregular_acceleration = smooth(residual, 0.20, deriv=1)
+    jerk = smooth(data, 0.30, deriv=2)
+    rms_frames = max(1, int(math.ceil(0.12 * rate)))
+    # A time warp raises derivatives, but DOES NOT enlarge a wobble's spatial
+    # excursion. Integrate signed velocities in source seconds, then remove a
+    # local quadratic position trajectory (equivalently integrate its velocity
+    # residual). A wider, independent position trend avoids erasing a visible
+    # wobble merely because the derivative trend follows part of its curve.
+    # Tiny high-frequency fit/quantisation noise
+    # must not become a veto just because its second derivative is large.
+    displacement = np.zeros_like(fine)
+    displacement[1:] = np.cumsum((fine[1:] + fine[:-1]) / (2 * rate), axis=0)
+    displacement -= smooth(displacement, 2.0, degree=2)
+    support_frames = max(3, int(round(rate)) | 1)
+    excursions = (maximum_filter1d(displacement, support_frames, axis=0, mode='nearest')
+                  - minimum_filter1d(displacement, support_frames, axis=0, mode='nearest'))
+    visible_excursions = dict(image=excursions[:, :4], angular=excursions[:, 4:])
+    peaks, raw_peaks, visibility, raw_metrics = {}, {}, {}, {}
+
+    def peak(name, vectors, family):
+        power = vectors ** 2
+        # Trailing windows avoid a padded edge changing a peak's meaning.
+        sums = np.vstack([np.zeros(power.shape[1]), np.cumsum(power, axis=0)])
+        component_power = np.maximum(0, (sums[rms_frames:] - sums[:-rms_frames])
+                                     / rms_frames)
+        rms = np.sqrt(np.sum(component_power, axis=1))
+        centres = np.arange(len(rms)) + (rms_frames - 1) // 2
+        span = visible_excursions[family][centres]
+        floor = _SPEED_VISIBILITY_FLOORS[family]
+        supported_components = span >= floor
+        supported = np.any(supported_components, axis=1)
+        # Match each component: a visible horizontal move cannot give a tiny
+        # vertical/scale/roll quantisation wiggle permission to veto the shot.
+        effective = np.sqrt(np.sum(component_power * supported_components, axis=1))
+        raw_i = int(np.argmax(rms))
+        # Search ALL derivative windows: an invisible global maximum must not
+        # hide a lower, visible correction elsewhere in the consumed interval.
+        i = int(np.argmax(effective)) if supported.any() else raw_i
+        raw_metrics[name] = float(rms[raw_i])
+        raw_peaks[name] = dict(value=float(rms[raw_i]),
+                              source_start=origin + raw_i / rate,
+                              source_end=min(end, origin + (raw_i + rms_frames) / rate))
+        peaks[name] = dict(value=float(effective[i]),
+                           source_start=origin + i / rate,
+                           source_end=min(end, origin + (i + rms_frames) / rate),
+                           visibility_supported=bool(supported[i]))
+        visibility[name] = dict(floor=floor,
+                                gating='same_component_local_displacement',
+                                unit='px_at_640_width' if family == 'image' else 'deg',
+                                component_names=(['horizontal', 'vertical', 'edge_rotation', 'edge_scale']
+                                                 if family == 'image' else list(angular_keys)),
+                                raw_peak_displacement_excursion=float(np.linalg.norm(span[raw_i])),
+                                supported_peak_displacement_excursion=float(np.linalg.norm(
+                                    span[i] * supported_components[i])),
+                                raw_peak_component_excursions=span[raw_i].tolist(),
+                                supported_peak_component_excursions=span[i].tolist(),
+                                supported_components=supported_components[i].tolist(),
+                                source_support_window_s=support_frames / rate,
+                                position_detrend_source_window_s=2.0,
+                                position_detrend_polynomial_degree=2,
+                                displacement_invariant_under_time_warp=True)
+        return peaks[name]['value']
+
+    metrics = {}
+    for family, sl, unit in (('image', slice(0, 4), 'px'),
+                             ('angular', slice(4, None), 'deg')):
+        metrics[f'{family}_irregular_velocity_{unit}_s'] = peak(
+            f'{family}_irregular_velocity_{unit}_s', residual[:, sl], family)
+        metrics[f'{family}_irregular_acceleration_{unit}_s2'] = peak(
+            f'{family}_irregular_acceleration_{unit}_s2',
+            irregular_acceleration[:, sl], family)
+        metrics[f'{family}_jerk_{unit}_s3'] = peak(
+            f'{family}_jerk_{unit}_s3', jerk[:, sl], family)
+    # Total motion is only a sampling limit, never a blanket rotation veto.
+    # Triangle inequality accounts for image translation + edge rotation/scale.
+    image_speed = (np.linalg.norm(fine[:, :2], axis=1)
+                   + np.abs(fine[:, 2]) + np.abs(fine[:, 3]))
+    angular_speed = np.linalg.norm(fine[:, 4:], axis=1)
+    metrics['image_speed_px_s'] = float(np.max(image_speed))
+    metrics['angular_speed_deg_s'] = float(np.max(angular_speed))
+    raw_metrics.update(image_speed_px_s=metrics['image_speed_px_s'],
+                       angular_speed_deg_s=metrics['angular_speed_deg_s'])
+    return dict(status='assessed', reasons=[], source_metrics=metrics,
+                raw_source_metrics=raw_metrics, raw_peak_intervals=raw_peaks,
+                visibility=visibility, peak_intervals=peaks, analysis_fps=rate,
+                source_sample_count=source_count, analysis_sample_count=len(data),
+                rms_source_window_s=rms_frames / rate,
+                fine_source_window_s=0.20, trend_source_window_s=0.80,
+                trend_polynomial_degree=2,
+                image_translation_method=('median_feature_displacement'
+                                          if all(has_median)
+                                          else 'similarity_center_displacement'))
+
+
+def _assess_playback_speed(evidence, fps, start, end, speed, output_fps):
+    result = dict(ok=False, reasons=list(evidence['reasons']),
+                  status=evidence['status'], playback_speed=speed,
+                  output_fps=output_fps, source_fps=fps, source_start=start,
+                  source_end=end, source_duration_s=end - start,
+                  output_duration_s=(end - start) / speed,
+                  method='motion_speed_v1', schema_version=1)
+    if evidence['status'] != 'assessed':
+        for key in ('missing_features', 'invalid_features'):
+            if key in evidence:
+                result[key] = evidence[key]
+        return result
+    source = evidence['source_metrics']
+    output = {}
+    for key, value in source.items():
+        exponent = 3 if 'jerk_' in key else 2 if 'acceleration_' in key else 1
+        output[key] = value * speed ** exponent
+    output['image_displacement_px_per_frame'] = source['image_speed_px_s'] * speed / output_fps
+    output['angular_displacement_deg_per_frame'] = source['angular_speed_deg_s'] * speed / output_fps
+    raw_output = {key: value * speed ** (
+        3 if 'jerk_' in key else 2 if 'acceleration_' in key else 1)
+        for key, value in evidence['raw_source_metrics'].items()}
+    if not all(math.isfinite(v) for v in (*output.values(), *raw_output.values())):
+        result.update(status='insufficient', reasons=['non_finite_scaled_motion_evidence'])
+        return result
+    reasons = [key + '_limit' for key, limit in _SPEED_LIMITS.items()
+               if output[key] > limit * (1 + 1e-9)]
+    result.update(ok=not reasons, reasons=reasons,
+                  source_metrics=source, output_metrics=output,
+                  raw_source_metrics=evidence['raw_source_metrics'],
+                  raw_output_metrics=raw_output,
+                  visibility=evidence['visibility'],
+                  raw_peak_intervals=evidence['raw_peak_intervals'],
+                  limits=dict(_SPEED_LIMITS),
+                  peak_intervals=evidence['peak_intervals'],
+                  analysis_fps=evidence['analysis_fps'],
+                  source_sample_count=evidence['source_sample_count'],
+                  analysis_sample_count=evidence['analysis_sample_count'],
+                  rms_source_window_s=evidence['rms_source_window_s'],
+                  rms_output_window_s=evidence['rms_source_window_s'] / speed,
+                  trend_polynomial_degree=evidence['trend_polynomial_degree'],
+                  image_translation_method=evidence['image_translation_method'],
+                  heuristic=True)
+    return result
+
+
+def playback_speed_quality(feats, fps, start, end, playback_speed, output_fps=30):
+    """Advisory smoothness of this EXACT consumed source window at a speed.
+
+    Velocity, irregular acceleration and jerk scale by k, k² and k³, but only
+    constrain playback with same-family local visible displacement support.
+    Displacement excursion is time-warp invariant. ``source_metrics`` and
+    ``output_metrics`` expose visibility-supported peaks; ``raw_*_metrics``
+    retain unmasked derivatives, including invisible high-frequency noise.
+    Uniform
+    velocity/acceleration survive detrending; fast regular motion can still
+    exceed the per-output-frame sampling limit. This does NOT check activity,
+    driving semantics, turn-backs or source stability: callers must AND their
+    existing gates. Missing/non-finite/out-of-cache evidence returns ``ok=False``
+    and ``status='insufficient'``; invalid scalar arguments raise ValueError.
+    """
+    fps, start, end, output_fps = _speed_arguments(fps, start, end, output_fps)
+    speed = _speed_parameter(playback_speed)
+    evidence = _playback_motion_evidence(feats, fps, start, end)
+    return _assess_playback_speed(evidence, fps, start, end, speed, output_fps)
+
+
+def playback_speed_profile(feats, fps, start, end, output_fps=30,
+                           speeds=(1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4)):
+    """Largest consecutively passing tested speed, starting with natural 1×.
+
+    ``None`` means insufficient evidence; zero means 1× failed. A final passing
+    4× means only that the assessed limit was reached, never unlimited speed.
+    The profile is bound to its source window, output FPS and method version.
+    """
+    fps, start, end, output_fps = _speed_arguments(fps, start, end, output_fps)
+    try:
+        speeds = [_speed_parameter(s) for s in speeds]
+    except TypeError:
+        raise ValueError('speeds must be an increasing sequence starting at 1') from None
+    if not speeds or speeds[0] != 1 or any(b <= a for a, b in zip(speeds, speeds[1:])):
+        raise ValueError('speeds must be an increasing sequence starting at 1')
+    evidence = _playback_motion_evidence(feats, fps, start, end)
+    assessments = [_assess_playback_speed(evidence, fps, start, end, speed, output_fps)
+                   for speed in speeds]
+    maximum = None
+    reasons = list(evidence['reasons'])
+    insufficient = next((q for q in assessments if q['status'] == 'insufficient'), None)
+    status = evidence['status']
+    if insufficient is not None:
+        status = 'insufficient'
+        reasons = insufficient['reasons']
+    elif status == 'assessed':
+        maximum = 0.0
+        for assessment in assessments:
+            if not assessment['ok']:
+                reasons = assessment['reasons']
+                break
+            maximum = assessment['playback_speed']
+    return dict(schema_version=1, method='motion_speed_v1', source_start=start,
+                source_end=end, output_fps=output_fps,
+                max_playback_speed=maximum, assessed_speeds=speeds,
+                assessments=assessments, limiting_reasons=reasons,
+                capped_at_assessment_limit=bool(maximum is not None
+                                               and maximum == speeds[-1]),
+                status=status, heuristic=True)
 
 
 def motion_series(feats, fps):

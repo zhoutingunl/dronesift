@@ -71,6 +71,21 @@ def test_features_coverage_ends_with_telemetry():
     assert n == 60
     assert f['tel_ok'][:50].all() and not f['tel_ok'][50:].any()
 
+def test_features_preserve_measured_median_translation_at_source_rate():
+    fps, count = 20, 40
+    flow = flow_rows(count, dx=50/fps, dy=-10/fps, mdx=12/fps, mdy=-4/fps)
+    tel = tel_rows(np.arange(count)/fps, vx=3)
+    feats, _ = seg.features(tel, flow, fps)
+    assert np.allclose(feats['dx_raw'], 50) and np.allclose(feats['dy_raw'], -10)
+    assert np.allclose(feats['mdx_raw'], 12) and np.allclose(feats['mdy_raw'], -4)
+    partial = [{k: v for k, v in row.items() if k != 'mdy'} for row in flow]
+    incomplete, _ = seg.features(tel, partial, fps)
+    assert 'mdx_raw' not in incomplete and 'mdy_raw' not in incomplete
+    for row in flow:
+        del row['mdx'], row['mdy']
+    legacy, _ = seg.features(tel, flow, fps)
+    assert 'mdx_raw' not in legacy and 'mdy_raw' not in legacy
+
 def test_aligned_tel_drops_duplicate_pts():
     pts = [0.0, 0.1, 0.1, 0.2, 0.3, 0.4]
     cols, covered = seg.aligned_tel(tel_rows(pts, vx=1.0), 4, 10.0)
@@ -455,3 +470,90 @@ def test_segments_labels_move_sequence():
     segs = seg.segments(f, keep, labels, dict(seg.DEFAULT_THR), fps)
     assert len(segs) == 1 and segs[0]['label'] == 'push_in>orbit_CW'
     assert segs[0]['moves'] == ['push_in', 'orbit_CW']
+
+@pytest.mark.parametrize('maximum', [None, 0, 2.0])
+def test_playback_assessment_annotates_final_boundaries_without_veto(monkeypatch, maximum):
+    from dronesift import shot_quality
+    fps = 10
+    features = make_feat(120)
+    keep = np.zeros(120, bool); keep[10:110] = True
+    calls = []
+
+    def assess(feats, source_fps, start, end, output_fps=30):
+        calls.append((feats is features, source_fps, start, end))
+        return dict(schema_version=1, method='motion_speed_v1', source_start=start,
+                    source_end=end, output_fps=output_fps, max_playback_speed=maximum)
+
+    monkeypatch.setattr(shot_quality, 'playback_speed_profile', assess)
+    output = seg.segments(features, keep, np.full(120, 'push'), dict(seg.DEFAULT_THR), fps)
+    assert len(output) == 1  # Missing evidence and no passing speed do not delete natural footage.
+    assert (output[0]['start_frame'], output[0]['end_frame']) == (13, 106)
+    assert calls == [(True, fps, 1.3, 10.7)]
+    assert output[0]['playback_speed_profile']['source_start'] == output[0]['start']
+    assert output[0]['playback_speed_profile']['source_end'] == output[0]['end']
+    assert output[0]['max_playback_speed'] == maximum
+
+def test_segment_run_serializes_profiles_from_cached_features(tmp_path, monkeypatch):
+    import json
+    from dronesift import shot_quality
+    fps, count = 10, 60
+    features = make_feat(count)
+    monkeypatch.setattr(seg, 'features', lambda *a, **k: (features, count))
+    monkeypatch.setattr(seg, 'classify_frames',
+                        lambda *a, **k: (np.ones(count, bool), np.full(count, 'push')))
+    monkeypatch.setattr(shot_quality, 'playback_speed_profile',
+                        lambda f, rate, start, end, output_fps=30: dict(max_playback_speed=1.5,
+                             source_start=start, source_end=end, output_fps=output_fps))
+    telemetry, flow, result = (tmp_path / name for name in ('遥测.csv', '光流.csv', '片段.json'))
+    for path in (telemetry, flow): path.write_text('frame\n0\n', encoding='utf-8')
+    seg.run(telemetry, flow, result, fps=fps)
+    row = json.loads(result.read_text(encoding='utf-8'))['segments'][0]
+    assert row['start'] == 0 and row['end'] == 6
+    assert row['max_playback_speed'] == 1.5
+    assert row['playback_speed_profile']['source_end'] == 6
+
+def test_split_shots_inherit_complete_segment_limit(monkeypatch):
+    from dronesift import shot_quality
+    fps, count = 10, 180
+    features = make_feat(count)
+    monkeypatch.setattr(shot_quality, 'playback_speed_profile',
+                        lambda f, rate, start, end, output_fps=30: dict(max_playback_speed=0,
+                             source_start=start, source_end=end, output_fps=output_fps))
+    labels = np.full(count, 'push')
+    thresholds = dict(seg.DEFAULT_THR, max_shot_s=6, target_shot_s=5, min_shot_s=3)
+    catalog = seg.segments(features, np.ones(count, bool), labels, thresholds, fps)
+    shots = seg.shots(catalog, features, labels, thresholds, fps)
+    assert len(shots) > 1
+    assert sum(s['duration'] for s in shots) == 18
+    assert all(s['max_playback_speed'] == 0 for s in shots)
+    assert all(s['playback_speed_profile'] == catalog[0]['playback_speed_profile'] for s in shots)
+
+@pytest.mark.parametrize('profile,label', [(None, '待评估'), ({'max_playback_speed': None}, '待评估'),
+    ({'max_playback_speed': 0}, '无通过档位'), ({'max_playback_speed': 1.5}, '≤1.5×')])
+def test_speed_label_does_not_treat_unknown_as_unlimited(profile, label):
+    assert seg.playback_speed_text(profile) == label
+
+@pytest.mark.parametrize('invalid', [
+    {'max_playback_speed': True}, {'max_playback_speed': 'fast'}, {'max_playback_speed': float('nan')},
+    {'source_start': float('nan')}, {'source_start': -.1}, {'source_end': 7},
+    {'output_fps': 60}, {'output_fps': True}, {'schema_version': True}, {'method': 'obsolete'},
+])
+def test_invalid_or_different_scope_profile_is_reassessed(monkeypatch, invalid):
+    from dronesift import shot_quality
+    calls = []
+    features = make_feat(60)
+    old = dict(schema_version=1, method='motion_speed_v1', source_start=0,
+               source_end=6, output_fps=30, max_playback_speed=4)
+    old.update(invalid)
+    new = dict(schema_version=1, method='motion_speed_v1', source_start=0,
+               source_end=6, output_fps=30, max_playback_speed=1.5)
+
+    def assess(f, fps, start, end, output_fps=30):
+        calls.append((f is features, output_fps))
+        return new
+
+    monkeypatch.setattr(shot_quality, 'playback_speed_profile', assess)
+    row = dict(start=0, end=6, playback_speed_profile=old, max_playback_speed=99)
+    seg.annotate_playback_speeds([row], features, 10, output_fps=30)
+    assert calls == [(True, 30)]
+    assert row['playback_speed_profile'] == new and row['max_playback_speed'] == 1.5

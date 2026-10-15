@@ -1,5 +1,5 @@
 """Write clips / EDL from a segments JSON."""
-import json, os, platform, subprocess, sys
+import copy, json, os, platform, subprocess, sys
 
 _TIME_EPS = 1e-6  # ffprobe prints timestamps to six decimal places
 
@@ -74,6 +74,21 @@ def encoder_args(mode, bitrate):
     return (['-c:v', 'prores_videotoolbox', '-profile:v', '3', '-pix_fmt', 'p210le'] if platform.system() == 'Darwin'
             else ['-c:v', 'prores_ks', '-profile:v', '3', '-pix_fmt', 'yuv422p10le'])   # ProRes 422 HQ 10-bit
 
+def playback_speed_metadata(segment, source_start, source_end):
+    """Copy a catalog advisory without claiming to reassess an exported subset."""
+    profile = copy.deepcopy(segment.get('playback_speed_profile'))
+    return dict(playback_speed_profile=profile,
+                max_playback_speed=(profile or {}).get('max_playback_speed'),
+                playback_speed_profile_scope=dict(
+                    basis='complete_catalog_segment',
+                    source_start=(profile or {}).get('source_start', segment['start']),
+                    source_end=(profile or {}).get('source_end', segment['end']),
+                    exported_source_start=source_start, exported_source_end=source_end,
+                    reassessed=False,
+                    subset_policy='inherits_catalog_advisory_ceiling_without_reassessment',
+                    exact_window_assessment_required_for_playback=True,
+                    catalog_profile_available=isinstance(profile, dict)))
+
 def cut(mp4, segs, outdir, mode='copy', fps=59.94, bitrate='80M', digits=2):
     os.makedirs(outdir, exist_ok=True); base = os.path.splitext(os.path.basename(mp4))[0]
     packets = video_packets(mp4, fps) if mode == 'copy' and segs else None
@@ -106,7 +121,8 @@ def cut(mp4, segs, outdir, mode='copy', fps=59.94, bitrate='80M', digits=2):
         duration = max(p['pts'] + p['duration'] for p in actual) - min(p['pts'] for p in actual)
         clips.append(dict(path=os.path.basename(out), requested_start=s['start'], requested_end=s['end'],
                           source_start=start, source_end=source_end, duration=duration,
-                          frames=len(actual), verified=verified))
+                          frames=len(actual), verified=verified,
+                          **playback_speed_metadata(s, start, source_end)))
         paths.append(out)
         print(f"wrote {out}  ({duration:.2f}s; source {start:.3f}s - {source_end:.3f}s)")
     manifest = dict(video=mp4, mode=mode, clips=clips, skipped=skipped,

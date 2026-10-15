@@ -140,7 +140,7 @@ def main() -> None:
         if not path.is_file():
             parser.error(f"Required cached analysis asset is missing: {path.name}")
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from dronesift import segment, viz
+    from dronesift import segment, shot_quality, viz
 
     thresholds = {**segment.DEFAULT_THR, **metadata["thresholds"]}
     with telemetry.open(encoding="utf-8", newline="") as stream:
@@ -234,6 +234,7 @@ def main() -> None:
         "analysis": {"version": "v6", "segments_basename": segments.name,
                      "segments_sha256": sha256(segments),
                      "segment_source_sha256": sha256(Path(segment.__file__)),
+                     "playback_speed_source_sha256": sha256(Path(shot_quality.__file__)),
                      "viz_source_sha256": sha256(Path(viz.__file__)),
                      "recomputed_with_current_source": True,
                      "segment_frames_and_labels_match_saved_v6": True,

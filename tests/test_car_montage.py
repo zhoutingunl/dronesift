@@ -57,7 +57,7 @@ def test_music_grid_keeps_every_original_cut_and_does_not_mutate_input():
     assert source == original
 
 
-def test_regular_tracking_pan_override_requires_full_actual_source_review(monkeypatch):
+def test_regular_tracking_pan_override_requires_full_actual_source_review(monkeypatch, playback_profile):
     video = 'DJI_20260928150908_0030_D.MP4'
     candidate = SimpleNamespace(video=video, fps=10, cuts_dir='unused', scene_id=1,
         seg=dict(start=0, end=10, base='push', label='push'),
@@ -70,6 +70,9 @@ def test_regular_tracking_pan_override_requires_full_actual_source_review(monkey
                 vehicle_present=True, vehicle_moving=True)
     slot = dict(start_frame=0, end_frame=180)
     monkeypatch.setattr(planner, 'motion_window_quality', lambda *args:dict(ok=True))
+    monkeypatch.setattr(planner, 'playback_speed_profile',
+                        lambda f, fps, a, b, **kw: playback_profile(a, b))
+    monkeypatch.setattr(planner, 'playback_speed_quality', lambda *args, **kw:dict(ok=True))
     partial = dict(note, end=8, allow_regular_tracking_pan=True)
     assert planner.checked_row(candidate, slot, 0, note, 1.5, [note], [partial]) is None
     complete = dict(partial, end=9)
@@ -88,3 +91,25 @@ def test_regular_tracking_pan_override_requires_full_actual_source_review(monkey
     candidate.feats['yaw_rate'][:] = 1.6
     monkeypatch.setattr(planner, 'motion_window_quality', lambda *args:dict(ok=False))
     assert planner.checked_row(candidate, slot, 0, note, 1.5, [note], [complete]) is None
+
+
+def test_straight_driving_review_does_not_override_playback_smoothness_limit(monkeypatch,
+                                                                          playback_profile):
+    video = 'DJI_20260928150908_0030_D.MP4'
+    candidate = SimpleNamespace(video=video, fps=10, cuts_dir='unused', scene_id=1,
+        seg=dict(start=0, end=10, base='push', label='push'),
+        capture=planner.montage.capture_datetime(video),
+        telemetry=dict(lon=np.linspace(116, 116.001, 101), lat=np.full(101, 43.6)),
+        feats=dict(yaw_rate=np.zeros(101), g_yaw=np.zeros(101),
+                   speed_h=np.full(101, 2), vz=np.zeros(101),
+                   v_lat=np.zeros(101), v_fwd=np.full(101, 2)))
+    note = dict(video=video, start=0, end=10, scene_group='road', vehicle_moving=True)
+    monkeypatch.setattr(planner, 'motion_window_quality', lambda *args: dict(ok=True))
+    monkeypatch.setattr(planner, 'playback_speed_profile',
+                        lambda f, fps, a, b, **kw: playback_profile(a, b, maximum=1.25))
+    monkeypatch.setattr(planner, 'playback_speed_quality', lambda *args, **kw: dict(ok=True))
+    slot = dict(start_frame=0, end_frame=90)
+    assert planner.checked_row(candidate, slot, 0, note, 1.5, [note], []) is None
+    row = planner.checked_row(candidate, slot, 0, note, 1, [note], [])
+    assert row['max_playback_speed'] == 1.25
+    assert row['playback_speed_profile']['source_end'] == 3

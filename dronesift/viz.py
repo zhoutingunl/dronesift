@@ -20,8 +20,8 @@ def thumb_sprite(video, duration, out_jpg, max_thumbs=200, hwaccel='auto'):
         subprocess.run(cmd, check=True)
     return step, count, rows
 
-def build(video, tel_csv, flow_csv, seg_json, out_html, hz=10.0, hwaccel='auto'):
-    from .segment import features, classify_frames, aligned_tel
+def build(video, tel_csv, flow_csv, seg_json, out_html, hz=10.0, hwaccel='auto', analysis=None):
+    from .segment import features, classify_frames, aligned_tel, annotate_playback_speeds, playback_speed_text
     with open(seg_json, encoding='utf-8') as fh:
         d = json.load(fh)
     fps = d['fps']; thr = d['thresholds']; segs = d['segments']
@@ -31,7 +31,15 @@ def build(video, tel_csv, flow_csv, seg_json, out_html, hz=10.0, hwaccel='auto')
         flow = list(csv.DictReader(fh))
     from .segment import DEFAULT_THR
     thr = {**DEFAULT_THR, **thr}
-    f, n = features(tel, flow, fps, rev_amp=thr['motion_rev_amp']); keep, labels = classify_frames(f, thr, fps)
+    if analysis is None:
+        f, n = features(tel, flow, fps, rev_amp=thr['motion_rev_amp'])
+        keep, labels = classify_frames(f, thr, fps)
+    else:
+        f, keep, labels = analysis
+        n = len(keep)
+    # Legacy catalog JSON has no speed assessment. Compute it from these same
+    # cached feature arrays rather than interpreting missing data as unlimited.
+    annotate_playback_speeds(segs, f, fps, output_fps=None)
     A, _ = aligned_tel(tel, n, fps)
     lat, lon = A['lat'], A['lon']
     R = 6371000.0; lat0 = math.radians(lat.mean())
@@ -57,7 +65,11 @@ def build(video, tel_csv, flow_csv, seg_json, out_html, hz=10.0, hwaccel='auto')
                 kept=float(keep.mean()), thr={k: thr[k] for k in ('jitter_px', 'motion_acc', 'yaw_acc', 'acc_h')},
                 segs=[dict(start=round(s['start'], 2), end=round(s['end'], 2), label=s['label'], moves=s.get('moves', [s['label']]),
                            duration=round(s['duration'], 1), base=s.get('base', ''), speed=round(s['speed_mps'], 1),
-                           yaw=round(s['yaw_rate_dps'], 1), radius=s.get('radius_m')) for s in segs])
+                           yaw=round(s['yaw_rate_dps'], 1), radius=s.get('radius_m'),
+                           max_playback_speed=s['max_playback_speed'],
+                           playback_speed_profile=s['playback_speed_profile'],
+                           speed_output_fps=s['playback_speed_profile'].get('output_fps', 30),
+                           speed_limit_label=playback_speed_text(s['playback_speed_profile'])) for s in segs])
     html = TEMPLATE.replace('__DATA__', json.dumps(data, separators=(',', ':'))).replace('__META__', json.dumps(meta, ensure_ascii=False))
     html = html.replace('__TITLE__', meta['name'] + ' 轨迹')
     with open(out_html, 'w', encoding='utf-8') as fh: fh.write(html)
@@ -105,6 +117,7 @@ h1{font-size:18px;font-weight:600;margin:0;font-family:var(--mono)}
 .chip.on{border-color:var(--accent);background:var(--range)}
 .chip i{width:9px;height:9px;border-radius:2px;display:inline-block}
 .chip span{color:var(--fg2)}
+.chip .speed-cap{color:var(--accent);font-weight:600}
 #p2d{height:620px}
 .legend{display:flex;flex-wrap:wrap;gap:4px 14px;padding:8px 12px 0;color:var(--fg2);font-size:12px}
 .legend i{width:10px;height:10px;border-radius:2px;display:inline-block;margin-right:5px;vertical-align:-1px}
@@ -142,6 +155,7 @@ h1{font-size:18px;font-weight:600;margin:0;font-family:var(--mono)}
 </div>
 <div class="panel p2dwrap"><div id="p2d"></div><div id="preview" hidden><div class="im"></div><div class="tt"></div></div></div>
 <p class="help">3D 图：拖动旋转，滚轮缩放，右键平移。粗线是所选时间区间，细线是其余轨迹，短刺指向相机朝向。缩略图序列均匀覆盖所选区间，点击可在 3D 中定位。下方任一时间轴上框选即可更改区间，双击恢复；悬停可在 3D 中定位。红底是被剔除的帧，绿色条带是连续运镜片段。</p>
+<p class="help">倍速上限：按输出帧率的运动规则估计（默认 30 fps），仅作片段属性，不改变原速切片；“待评估”表示证据不足，“无通过档位”表示没有评估档位通过。上限以已评估的档位为界，不代表允许任意更高倍速。</p>
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.35.0/plotly.min.js"></script>
 <script>
@@ -194,7 +208,7 @@ document.getElementById('fit').addEventListener('click', ()=>fit3d());
 const chips = document.getElementById('chips');
 M.segs.forEach((s,i)=>{
   const b=document.createElement('button'); b.type='button'; b.className='chip'; b.dataset.s=s.start; b.dataset.e=s.end;
-  b.innerHTML = `<i style="background:var(--c-${s.base||'truck'})"></i>${String(i+1).padStart(2,'0')} ${s.label} <span>${fmt(s.start)} · ${s.duration}s${s.radius?` · r≈${Math.round(s.radius)}m`:''}</span>`;
+  b.innerHTML = `<i style="background:var(--c-${s.base||'truck'})"></i>${String(i+1).padStart(2,'0')} ${s.label} <span>${fmt(s.start)} · ${s.duration}s${s.radius?` · r≈${Math.round(s.radius)}m`:''}</span> <span class="speed-cap">${s.speed_limit_label||'待评估'}${s.speed_output_fps!==30?` @${s.speed_output_fps}fps`:''}</span>`;
   b.addEventListener('click', ()=>setRange(s.start, s.end)); chips.appendChild(b);
 });
 

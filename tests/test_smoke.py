@@ -47,6 +47,10 @@ def test_full_pipeline_synthetic_video(tmp_path):
     assert len(d['segments']) == 1
     s = d['segments'][0]
     assert s['label'] == 'push_in' and s['duration'] > 4.0
+    assert 'max_playback_speed' in s
+    assert s['playback_speed_profile']['source_start'] == s['start']
+    assert s['playback_speed_profile']['source_end'] == s['end']
+    assert s['playback_speed_profile']['output_fps'] == 30
     assert (out / 'IN.edl').exists() and 'FROM CLIP NAME: IN.MP4' in (out / 'IN.edl').read_text()
     assert (out / 'IN_timeline.png').exists() and (out / 'IN_viz.html').exists()
 
@@ -73,5 +77,8 @@ def test_cached_copy_pipeline_preserves_complete_clean_video(tmp_path):
     clip = manifest['clips'][0]
     assert clip['verified'] and clip['frames'] == 180
     assert clip['source_start'] == 0 and clip['source_end'] == pytest.approx(6, abs=1e-6)
+    assert clip['playback_speed_profile'] == d['segments'][0]['playback_speed_profile']
+    assert clip['max_playback_speed'] == d['segments'][0]['max_playback_speed']
+    assert clip['playback_speed_profile_scope']['reassessed'] is False
     assert (out / clip['path']).exists()
     assert {p.name: p.read_bytes() for p in cache.glob('*.csv')} == original_caches

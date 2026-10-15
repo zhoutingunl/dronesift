@@ -11,8 +11,9 @@
     "version": "v6",
     "segments_basename": "DJI_20261004123758_0011_D_segments.json",
     "segments_sha256": "344cf37cdd84d1ecfd66a1e94f5bd6f9b925c1c15b04e3b07faf4f17880adb39",
-    "segment_source_sha256": "7c49484ab5a0e53338c93799e2c60d4e85e98e5a7e248c78761c94f465faaab3",
-    "viz_source_sha256": "73aa5a2e5c78c179587e5dfdf849bd2ecd8d99c4b2c35f7b0e0931de1af73d42",
+    "segment_source_sha256": "fe886b0f14ed86c57ced4fcd0520d7a807eef67da119c09dfcf475cbf260ce7a",
+    "playback_speed_source_sha256": "95f3b80c9745ae45127a0189f97ea8393b7472eb0699edc0e08b69c8dad56783",
+    "viz_source_sha256": "e38accf6f52decc11149752c43a6597009e685ed4a536a5fc82e4a352e12bc74",
     "recomputed_with_current_source": true,
     "segment_frames_and_labels_match_saved_v6": true,
     "thresholds": {
@@ -131,8 +132,8 @@
     },
     {
       "path": "../examples/flight-report.html",
-      "bytes": 304465,
-      "sha256": "097771687a2c3ed35c1862239d6018ff5f770cf00f5455b6c80d6a1d2ccc4a3c"
+      "bytes": 506517,
+      "sha256": "6b0804bc15a45c43e667a8e8ef564f9f970f8153381c2ce092a68647d52c4ac1"
     }
   ],
   "validation": {
@@ -183,15 +184,15 @@
     "screenshots": [
       {
         "file": "analysis-report.png",
-        "bytes": 314089,
-        "sha256": "bbda926e393b0c2234ecdf53054b555550fa46b1908d12d4965f8fb9e7495c61",
+        "bytes": 334343,
+        "sha256": "69614832926dbf259e0b9f483f35f962dc9bdcfa65b65c846357ff3fb1347d8e",
         "width": 1432,
-        "height": 1488
+        "height": 1547
       },
       {
         "file": "analysis-timeline.png",
         "bytes": 83401,
-        "sha256": "95c3c853cfdd9c16178a6d43945b59b73c32c452b0f042eae325024847a2a9d4",
+        "sha256": "f6236c064962ce1b8716dce18e0ab6853a499b9306095c18612add08a0a66020",
         "width": 1400,
         "height": 623
       }

@@ -25,7 +25,7 @@ from scipy.ndimage import gaussian_filter1d
 from scipy.signal import correlate, find_peaks
 
 from . import segment
-from .shot_quality import motion_window_quality, valid_motion_windows
+from .shot_quality import motion_window_quality, valid_motion_windows, playback_speed_profile
 
 
 def _spectral_flux(y, sr, hop=256, n_fft=2048):
@@ -267,6 +267,10 @@ class SourceCandidate:
                 a, b = int(round(start * self.fps)), int(math.ceil(end * self.fps))
                 sl = slice(a, b)
                 quality = motion_window_quality(self.feats, self.fps, start, end)
+                profile = playback_speed_profile(self.feats, self.fps, start, end, output_fps=30)
+                maximum = profile['max_playback_speed']
+                if maximum is not None and maximum < 1:
+                    continue
                 yaw = self.feats['yaw_rate'][sl]
                 yaw_mean = float(np.mean(np.abs(yaw)))
                 yaw_span = float(np.abs(self.feats['g_yaw'][b - 1] - self.feats['g_yaw'][a]))
@@ -306,6 +310,7 @@ class SourceCandidate:
                                  directional=bool(move in ('push', 'pull', 'truck', 'diagonal')
                                                   and shot_bearing is not None),
                                  scene_id=self.scene_id, quality=quality, score=score,
+                                 max_playback_speed=maximum, playback_speed_profile=profile,
                                  stable_segment_start=self.seg['start'],
                                  stable_segment_end=self.seg['end'], **route))
             # Keep high-quality and evenly spaced alternatives; otherwise one

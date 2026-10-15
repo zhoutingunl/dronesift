@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 
 from . import montage
-from .shot_quality import motion_window_quality
+from .shot_quality import motion_window_quality, playback_speed_profile, playback_speed_quality
 
 
 def capture_bounds(row):
@@ -56,6 +56,14 @@ def checked_row(candidate, slot, start, note, speed, straight, pan_reviews):
     quality = motion_window_quality(candidate.feats, candidate.fps, start, end)
     if not quality['ok']:
         return None
+    profile = playback_speed_profile(candidate.feats, candidate.fps, start, end, output_fps=30)
+    maximum = profile['max_playback_speed']
+    speed_quality = playback_speed_quality(candidate.feats, candidate.fps, start, end,
+                                          speed, output_fps=30)
+    if maximum is not None and (speed > maximum + 1e-7 or not speed_quality['ok']):
+        return None
+    if speed > 1 and (maximum is None or not speed_quality['ok']):
+        return None
     a, b = round(start * candidate.fps), math.ceil(end * candidate.fps)
     sl, feats = slice(a, b), candidate.feats
     yaw_mean = float(np.mean(np.abs(feats['yaw_rate'][sl])))
@@ -92,6 +100,8 @@ def checked_row(candidate, slot, start, note, speed, straight, pan_reviews):
                stable_segment_start=candidate.seg['start'], stable_segment_end=candidate.seg['end'],
                duration=duration, slot_start=slot['start_frame']/30, output_fps=30,
                playback_speed=speed, straight_driving=speed > 1, reversed=False,
+               max_playback_speed=maximum, playback_speed_profile=profile,
+               playback_speed_quality=speed_quality,
                move=move, rotation=bool(rotation), telemetry_rotation=bool(raw_rotation),
                camera_rotation_review='regular_tracking_pan' if pan else 'telemetry',
                yaw_mean_abs_dps=round(yaw_mean, 3), yaw_span_deg=round(yaw_span, 3),

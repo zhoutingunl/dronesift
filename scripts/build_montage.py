@@ -13,6 +13,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from dronesift import montage, render
+from dronesift.playback import validate_playback_speed
 
 
 def route_plot(plan, path):
@@ -151,6 +152,10 @@ def validate_plan(plan, music_path):
             raise ValueError('a scene exceeds its planned shot limit')
         used.append(row)
         previous = row
+    for row, rendered in zip(plan['timeline'], rendered_timeline):
+        validate_playback_speed(row, source_start=rendered['source_consumed_start'],
+                                source_end=rendered['source_consumed_end'], output_fps=30,
+                                require_assessment=True)
     return summary
 
 

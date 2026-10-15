@@ -87,6 +87,20 @@ def test_no_track_rejects_claimed_hiking_direction(tmp_path, monkeypatch):
         build.validate_plan(edit, 'music')
 
 
+def test_plan_cannot_authorize_acceleration_without_window_assessment(tmp_path, monkeypatch,
+                                                                    playback_profile):
+    edit = plan(tmp_path, monkeypatch, routes=(100,), captures=(100,))
+    row = edit['timeline'][0]
+    row.update(playback_speed=1.5, end=3)
+    with pytest.raises(ValueError, match='requires a playback_speed_profile'):
+        build.validate_plan(edit, 'music')
+    row['playback_speed_profile'] = playback_profile(0, 3, maximum=1.25)
+    with pytest.raises(ValueError, match='exceeds assessed maximum'):
+        build.validate_plan(edit, 'music')
+    row['playback_speed_profile'] = playback_profile(0, 3, maximum=1.5)
+    assert build.validate_plan(edit, 'music')['shots'] == 1
+
+
 def chronological_plan(tmp_path, monkeypatch):
     edit = plan(tmp_path, monkeypatch, captures=(100, 200))
     edit.update(route_mode='no_track', track=None, capture_order='strict')
@@ -114,10 +128,11 @@ def test_strict_capture_order_includes_parked_and_landscape_inserts(tmp_path, mo
         build.validate_plan(edit, 'music')
 
 
-def test_strict_capture_order_checks_consumed_end_at_playback_speed(tmp_path, monkeypatch):
+def test_strict_capture_order_checks_consumed_end_at_playback_speed(tmp_path, monkeypatch, playback_profile):
     edit = chronological_plan(tmp_path, monkeypatch)
     first, second = edit['timeline']
     first.update(start=0, end=4, playback_speed=2)
+    first['playback_speed_profile'] = playback_profile(0, 4)
     # A separate recording can begin inside the accelerated first window:
     # its filename is later, but the actual source intervals still overlap.
     source = tmp_path / 'DJI_20260928150003_0002_D.MP4'

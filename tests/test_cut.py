@@ -57,7 +57,11 @@ def test_copy_export_reordered_source_stays_inside_requested_range(tmp_path):
     packets = cut.video_packets(str(source), 30)
     assert any(abs(p['pts'] - p['dts']) > 0.001 for p in packets)
     outdir = tmp_path / 'cuts'
-    segs = [dict(start=0.53, end=1.8, label='pan')]
+    profile = dict(schema_version=1, method='motion_speed_v1', source_start=.53,
+                   source_end=1.8, output_fps=30, max_playback_speed=1.5,
+                   assessments=[dict(speed=1.5, passed=True)], limiting_reasons=['motion_limit'])
+    segs = [dict(start=0.53, end=1.8, label='pan', playback_speed_profile=profile,
+                 max_playback_speed=1.5)]
     paths = cut.cut(str(source), segs, str(outdir), fps=30)
     manifest = json.loads((outdir / 'reordered_exports.json').read_text())
     clip = manifest['clips'][0]
@@ -67,6 +71,14 @@ def test_copy_export_reordered_source_stays_inside_requested_range(tmp_path):
     assert clip['source_end'] <= 1.8 + 1e-6
     assert clip['frames'] == len(cut.video_packets(paths[0], 30))
     assert manifest['total_duration'] == clip['duration']
+    assert clip['playback_speed_profile'] == profile
+    assert clip['max_playback_speed'] == 1.5
+    assert clip['playback_speed_profile_scope'] == dict(
+        basis='complete_catalog_segment', source_start=.53, source_end=1.8,
+        exported_source_start=clip['source_start'], exported_source_end=clip['source_end'],
+        reassessed=False, subset_policy='inherits_catalog_advisory_ceiling_without_reassessment',
+        exact_window_assessment_required_for_playback=True,
+        catalog_profile_available=True)
     # Packet payloads establish that the seek/count exported the intended
     # source frames, even when several GOPs share the same timestamp pattern.
     def hashes(path):

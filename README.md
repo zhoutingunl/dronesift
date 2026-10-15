@@ -88,7 +88,7 @@ Outputs, written next to the video in `<video>_cuts/`:
 
 | file | contents |
 |---|---|
-| `<name>_segments.json` | per-segment ranges and labels, selection retention, and detected disturbance intervals |
+| `<name>_segments.json` | per-segment ranges, labels, estimated playback-speed limits, retention and disturbance intervals |
 | `<name>_exports.json` | actual exported durations, frame counts, source ranges, and verification results |
 | `<name>.edl` | CMX3600 EDL referencing the **original** file — import into Resolve/Premiere/FCP with no re-encode |
 | `<name>.fcpxml` | FCPXML 1.9 spine (same edit) — imports into Final Cut Pro and Resolve |
@@ -149,6 +149,34 @@ analysis pass).
 
 All thresholds are CLI flags (`--jitter-px`, `--yaw-acc`, `--min-len-s`, ...); see
 `uv run dronesift --help`. Cached analysis makes threshold tuning a few seconds per run.
+
+Each selected segment also has a `max_playback_speed` and a
+`playback_speed_profile`. The report displays the estimated limit, such as
+`≤1.25×`, at its assessed output frame rate (30 fps by default). The estimator
+checks brief irregular image/gimbal motion and displacement per output frame;
+velocity, acceleration and jerk grow with speed by k, k² and k³. Regular constant
+or uniformly accelerating movement is separated from short corrections. A
+derivative limit only vetoes a window when the same motion component also has
+locally visible displacement; speeding up does not enlarge a wobble's excursion.
+
+These are rule-based estimates over tested speed steps, not a guarantee of
+viewing comfort. `null` means insufficient evidence; `0` means no tested speed
+passed. Passing the highest tested 4× step does not imply unlimited acceleration.
+Natural-speed activity, subject-motion reviews and reverse-playback checks still
+apply independently.
+
+Update an existing result from its cached CSVs without re-encoding its clips:
+
+```bash
+uv run python -m dronesift.assess_speed /path/to/DJI_xxx_cuts_v6 --output-fps 30
+```
+
+The command annotates segments, an existing export report and, when cached
+thumbnails are available, the HTML report. A trimmed export inherits the
+catalog annotation as advice. Montage acceleration requires a fresh assessment
+for the **exact source window actually consumed**, at the intended output FPS;
+a parent segment's estimate cannot authorize a different crop. The planner and
+renderer reject unsupported acceleration, including unassessed legacy fast edits.
 
 Full engineering notes (in Chinese, with worked failure cases) are in
 [README.zh-CN.md](README.zh-CN.md).

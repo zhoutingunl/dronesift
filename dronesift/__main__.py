@@ -78,7 +78,7 @@ def main():
     print(f"kept frames {keep.mean() * 100:.1f}%  ->  {len(segs)} segments, {sum(s['duration'] for s in segs):.1f}s"
           + (f"; {len(shots)} shots" if shots else ''))
     for s in segs:
-        print(f"  {seg.hms(s['start'])} - {seg.hms(s['end'])}  {s['duration']:5.1f}s  {s['label']:28s} jitter={s['jitter_px']:.1f}px/s v={s['speed_mps']:.1f}m/s yaw={s['yaw_rate_dps']:+.1f}°/s climb={s['climb_mps']:+.1f}m/s" + (f" r≈{s['radius_m']:.0f}m" if s.get('radius_m') else ''))
+        print(f"  {seg.hms(s['start'])} - {seg.hms(s['end'])}  {s['duration']:5.1f}s  {s['label']:28s} jitter={s['jitter_px']:.1f}px/s v={s['speed_mps']:.1f}m/s yaw={s['yaw_rate_dps']:+.1f}°/s climb={s['climb_mps']:+.1f}m/s" + (f" r≈{s['radius_m']:.0f}m" if s.get('radius_m') else '') + f" playback={seg.playback_speed_text(s.get('playback_speed_profile'))} (30fps)")
     if a.mode != 'none':
         cutmod.cut(video, segs, out, a.mode, fps, bitrate=a.bitrate)
         exported = json.load(open(os.path.join(out, base + '_exports.json')))
