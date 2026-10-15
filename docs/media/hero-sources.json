@@ -1,0 +1,71 @@
+{
+  "description": "Real stable v6 source windows, silent and at natural speed.",
+  "duration_s": 12.0,
+  "audio": false,
+  "digital_stabilization": false,
+  "metadata": "Source metadata and chapters removed; no GPS included.",
+  "shots": [
+    {
+      "source": "DJI_20261001124446_0017_D.MP4",
+      "source_start_s": 4.6044,
+      "source_end_s": 8.6044,
+      "duration_s": 4.0,
+      "playback_speed": 1.0,
+      "reversed": false,
+      "label": "MOUNTAIN REVEAL"
+    },
+    {
+      "source": "DJI_20261001153456_0031_D.MP4",
+      "source_start_s": 38.304733333,
+      "source_end_s": 42.304733333,
+      "duration_s": 4.0,
+      "playback_speed": 1.0,
+      "reversed": false,
+      "label": "VALLEY PUSH-IN"
+    },
+    {
+      "source": "DJI_20261001153939_0040_D.MP4",
+      "source_start_s": 6.2054,
+      "source_end_s": 10.2054,
+      "duration_s": 4.0,
+      "playback_speed": 1.0,
+      "reversed": false,
+      "label": "HIKER TRACK"
+    }
+  ],
+  "derivatives": {
+    "steady-moves.mp4": {
+      "width": 960,
+      "height": 540,
+      "fps": 24,
+      "frames": 288,
+      "codec": "H.264",
+      "pixel_format": "yuv420p",
+      "color": "BT.709 limited range",
+      "crf": 28,
+      "bytes": 1399243
+    },
+    "steady-moves.gif": {
+      "width": 480,
+      "height": 270,
+      "fps": 8,
+      "frames": 96,
+      "duration_s": 12.0,
+      "palette_colors": 64,
+      "dither": "bayer",
+      "bayer_scale": 5,
+      "loop": true,
+      "optional_optimizer": {
+        "tool": "gifsicle",
+        "optimization": 3,
+        "lossy": 200
+      },
+      "bytes": 3837028,
+      "final_delay_centiseconds": 12
+    },
+    "steady-moves.jpg": {
+      "poster_time_s": 2.0,
+      "bytes": 76899
+    }
+  }
+}

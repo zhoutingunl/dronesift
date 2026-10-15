@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "generator": "scripts/build_showcase_comparison.py",
+  "source": "DJI_20261001123356_0013_D.MP4",
+  "source_metadata": "DJI_20261001123356_0013_D_cuts_v6/DJI_20261001123356_0013_D_segments.json",
+  "source_fps": "60000/1001",
+  "original_window_s": [
+    6.373033333333334,
+    16.449766666666665
+  ],
+  "selected_windows_s": [
+    [
+      6.373033333333334,
+      10.477133333333333
+    ],
+    [
+      12.746066666666668,
+      16.449766666666665
+    ]
+  ],
+  "selected_source_frames_inclusive": [
+    [
+      382,
+      627
+    ],
+    [
+      764,
+      985
+    ]
+  ],
+  "discarded_window_including_margins_s": [
+    10.477133333333333,
+    12.746066666666668
+  ],
+  "detected_yaw_nudge_s": [
+    10.76075,
+    12.46245
+  ],
+  "original_duration_s": 10.076733333333332,
+  "selected_duration_s": 7.807799999999997,
+  "playback_speed": 1,
+  "reversed": false,
+  "digital_stabilization": false,
+  "audio": false,
+  "render": {
+    "fps": 24,
+    "original_frames": 242,
+    "selected_part_frames": [
+      98,
+      89
+    ],
+    "selected_complete_at_frame": 187,
+    "selected_complete_at_s": 7.791666666666667,
+    "selected_end_card_frames": 55,
+    "gif": {
+      "width": 640,
+      "fps": 8,
+      "palette_colors": 64,
+      "dither": "bayer",
+      "bayer_scale": 5,
+      "gifsicle_lossy": 220,
+      "timing_note": "GIF delays are quantized to 10 ms, so its measured duration can differ slightly from the MP4. Use the target fps and measured duration; ffprobe may report the reciprocal of the first frame delay as avg_frame_rate."
+    },
+    "note": "Each trimmed interval is independently rounded by ffmpeg's fps filter. The right panel jumps source time at the cut and shows an explicit completion card after the selection ends. The raw source continues to the end. Both panels play forward at 1x.",
+    "original_rendered_duration_s": 10.083333333333334,
+    "selected_rendered_duration_s": 7.791666666666667
+  },
+  "assets": [
+    {
+      "file": "cut-comparison.mp4",
+      "bytes": 451866,
+      "sha256": "c14a6a5fe3f39ac11db536a294f48002a936fa81ad8f367a9ca3560449d78a6e",
+      "width": 960,
+      "height": 330,
+      "frames": 242,
+      "duration_s": 10.083333,
+      "average_frame_rate": "24/1",
+      "codec": "h264",
+      "pixel_format": "yuv420p",
+      "audio_streams": 0
+    },
+    {
+      "file": "cut-comparison.gif",
+      "bytes": 1958939,
+      "sha256": "2f568671629b6c8043d0858d696c1b3571071f4b396db3112871dc71e3174aa5",
+      "width": 640,
+      "height": 220,
+      "frames": 81,
+      "duration_s": 10.13,
+      "average_frame_rate": "25/3",
+      "codec": "gif",
+      "pixel_format": "bgra",
+      "audio_streams": 0
+    }
+  ]
+}

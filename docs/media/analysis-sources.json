@@ -1,0 +1,200 @@
+{
+  "schema_version": 1,
+  "generator": "scripts/build_showcase_report.py",
+  "source": {
+    "basename": "DJI_20261004123758_0011_D.MP4",
+    "sha256": "046a32776e7b8e3c7ff6c4a3ab1a9b825e51ff7470cca4afb3424614863fba59",
+    "fps": 59.94005994005994,
+    "frames": 4471
+  },
+  "analysis": {
+    "version": "v6",
+    "segments_basename": "DJI_20261004123758_0011_D_segments.json",
+    "segments_sha256": "344cf37cdd84d1ecfd66a1e94f5bd6f9b925c1c15b04e3b07faf4f17880adb39",
+    "segment_source_sha256": "7c49484ab5a0e53338c93799e2c60d4e85e98e5a7e248c78761c94f465faaab3",
+    "viz_source_sha256": "73aa5a2e5c78c179587e5dfdf849bd2ecd8d99c4b2c35f7b0e0931de1af73d42",
+    "recomputed_with_current_source": true,
+    "segment_frames_and_labels_match_saved_v6": true,
+    "thresholds": {
+      "jitter_px": 30,
+      "hf_flip": 0.25,
+      "motion_rev_amp": 0,
+      "jitter_spike_px": 45,
+      "spike_min_frames": 3,
+      "spike_pad_s": 0.35,
+      "acc_h": 1.2,
+      "acc_z": 1,
+      "accel_veto_rel": 0.5,
+      "yaw_acc": 8,
+      "pitch_acc": 8,
+      "yaw_correction_dps": 6,
+      "yaw_nudge_dps": 2,
+      "yaw_nudge_rel": 0.5,
+      "yaw_nudge_motion_px": 10,
+      "yaw_nudge_episode_s": 5,
+      "yaw_nudge_gap_s": 0.25,
+      "yaw_nudge_quiet_dps": 0.5,
+      "pitch_return_dps": 1.5,
+      "pitch_return_rel": 0.35,
+      "roll_correction_dps": 1.5,
+      "correction_motion_px": 5,
+      "brake_yaw_acc": 12,
+      "brake_motion_acc": 40,
+      "disturbance_min_s": 0.1,
+      "disturbance_pad_s": 0.35,
+      "motion_acc": 60,
+      "motion_acc_rel": 0.5,
+      "expo_jump": 0.3,
+      "consist": 0.6,
+      "consist_floor": 8,
+      "blur_drop": 0.45,
+      "min_len_s": 3,
+      "merge_gap_s": 0.5,
+      "trim_s": 0.3,
+      "label_min_s": 3,
+      "label_filter_s": 2,
+      "climb_rate": 1,
+      "split_labels": 0,
+      "max_shot_s": 0,
+      "target_shot_s": 6,
+      "min_shot_s": 4,
+      "hover_speed": 0.4,
+      "pan_rate": 1.5,
+      "orbit_rate": 0.8,
+      "orbit_r_min": 1,
+      "orbit_r_max": 1000
+    },
+    "telemetry_sha256": "b62de584273ec7e2dea68ef0ff79e442afe2d1ca9723498c6a48335172795e5a",
+    "flow_sha256": "638c0a401ef8c9b9d1cc57166abff0ff4e0f8e1fde202d9997c79dc5b5f9ba9a",
+    "thumbnail_sprite_sha256": "9ee016c4efae007f3efe25370bbf587954ca140cc25525548e539b5a91f08cc4",
+    "segment_windows_s": [
+      [
+        12.1121,
+        19.5195
+      ],
+      [
+        24.457766666666668,
+        35.702333333333335
+      ],
+      [
+        37.88785,
+        47.06368333333334
+      ]
+    ],
+    "frame_gate_pass_fraction": 0.598300156564527,
+    "final_selected_duration_s": 27.8278,
+    "source_duration_s": 74.59118333333333,
+    "final_selected_fraction": 0.373070901364348,
+    "retention_note": "Frame gate pass rate precedes continuous-segment, minimum-length and edge trimming; it is not final selected duration / source duration."
+  },
+  "preview": {
+    "source_window_s": [
+      24.457766666666668,
+      32.45776666666667
+    ],
+    "stable_segment_index": 2,
+    "playback_speed": 1,
+    "reversed": false,
+    "digital_stabilization": false,
+    "audio": false,
+    "fps": 24,
+    "frames": 192,
+    "duration_s": 8,
+    "width": 960,
+    "height": 540,
+    "codec": "h264",
+    "pixel_format": "yuv420p",
+    "colorspace": "bt709",
+    "original_metadata_copied": false,
+    "timing_note": "Source seek begins at the stated interval; output is sampled to 24 fps without changing playback speed."
+  },
+  "report": {
+    "generator": "dronesift.viz.build",
+    "showcase_appends_video_player": true,
+    "absolute_paths": false,
+    "absolute_gps": false,
+    "trajectory_coordinates": "Mean-centered east/north in meters; relative altitude",
+    "external_dependencies": [
+      "https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.35.0/plotly.min.js"
+    ]
+  },
+  "assets": [
+    {
+      "path": "analysis-selection.mp4",
+      "bytes": 1640578,
+      "sha256": "a9cc635f16f27a94c3067289618c9051ecadc283288608ad0ae8151c1da7aaff"
+    },
+    {
+      "path": "analysis-selection.jpg",
+      "bytes": 92280,
+      "sha256": "3ee8dbaa86f452c8065cf9ef94c0a5880ee2dbf191c6cb46b8b3b0e9954f7ba7"
+    },
+    {
+      "path": "../examples/flight-report.html",
+      "bytes": 304465,
+      "sha256": "097771687a2c3ed35c1862239d6018ff5f770cf00f5455b6c80d6a1d2ccc4a3c"
+    }
+  ],
+  "validation": {
+    "decoded_frames": 192,
+    "video_duration_s": 8,
+    "audio_streams": 0,
+    "absolute_gps_fields": 0,
+    "report_matches_saved_frame_gate": true
+  },
+  "browser_capture": {
+    "generator": "scripts/capture_showcase_report.cjs",
+    "browser": "155.0.8059.79",
+    "viewport": {
+      "width": 1440,
+      "height": 900
+    },
+    "device_scale_factor": 1,
+    "camera_eye": {
+      "x": 1.7,
+      "y": -2.4,
+      "z": 1.7
+    },
+    "color_scheme": "light",
+    "overview_range_s": [
+      0,
+      74.57
+    ],
+    "detail_range_s": [
+      16,
+      40
+    ],
+    "hovered_preview_source_s": 20,
+    "relative_report": "../examples/flight-report.html",
+    "ui_checks": {
+      "chipWorks": true,
+      "inputsWork": true,
+      "plotZoomWorks": true,
+      "thumbnailWorks": true,
+      "resetWorks": true
+    },
+    "selected_video": {
+      "duration_s": 8,
+      "width": 960,
+      "height": 540,
+      "source": "../media/analysis-selection.mp4"
+    },
+    "javascript_errors": [],
+    "screenshots": [
+      {
+        "file": "analysis-report.png",
+        "bytes": 314089,
+        "sha256": "bbda926e393b0c2234ecdf53054b555550fa46b1908d12d4965f8fb9e7495c61",
+        "width": 1432,
+        "height": 1488
+      },
+      {
+        "file": "analysis-timeline.png",
+        "bytes": 83401,
+        "sha256": "95c3c853cfdd9c16178a6d43945b59b73c32c452b0f042eae325024847a2a9d4",
+        "width": 1400,
+        "height": 623
+      }
+    ]
+  }
+}
