@@ -1,0 +1,172 @@
+{
+  "protocol_version": 1,
+  "kind": "manifest",
+  "job_id": "job_synthetic_trip",
+  "job_revision": 0,
+  "message_id": "msg_manifest_estimate",
+  "producer": "client",
+  "stage": "estimate",
+  "assets": [
+    {
+      "asset_id": "asset_video_a",
+      "source_revision": "source_rev_video_a",
+      "capture_order": 0,
+      "capture_order_basis": "user",
+      "dimensions": {
+        "width": 3840,
+        "height": 2160
+      },
+      "display_rotation": 0,
+      "channels": [
+        {
+          "name": "flow_translation",
+          "provenance": "measured",
+          "origin": "optical_flow",
+          "coverage_fraction": 1
+        },
+        {
+          "name": "flow_rotation",
+          "provenance": "measured",
+          "origin": "optical_flow",
+          "coverage_fraction": 1
+        },
+        {
+          "name": "flow_scale",
+          "provenance": "measured",
+          "origin": "optical_flow",
+          "coverage_fraction": 1
+        },
+        {
+          "name": "gimbal_yaw",
+          "provenance": "measured",
+          "origin": "djmd",
+          "coverage_fraction": 1
+        },
+        {
+          "name": "gimbal_pitch",
+          "provenance": "measured",
+          "origin": "djmd",
+          "coverage_fraction": 1
+        },
+        {
+          "name": "gimbal_roll",
+          "provenance": "measured",
+          "origin": "djmd",
+          "coverage_fraction": 1
+        }
+      ],
+      "media_type": "video",
+      "duration": {
+        "num": 6,
+        "den": 1
+      },
+      "timing": {
+        "mode": "verified_cfr",
+        "fps": {
+          "num": 30,
+          "den": 1
+        },
+        "native_time_base": {
+          "num": 1,
+          "den": 90000
+        },
+        "frame_count": 180,
+        "mapping": "verified_frame_index_to_pts",
+        "revision": "timing_rev_video_a",
+        "presentation_start_pts": 0
+      }
+    },
+    {
+      "asset_id": "asset_photo_b",
+      "source_revision": "source_rev_photo_b",
+      "capture_order": 1,
+      "capture_order_basis": "user",
+      "dimensions": {
+        "width": 4000,
+        "height": 3000
+      },
+      "display_rotation": 0,
+      "channels": [],
+      "media_type": "photo"
+    }
+  ],
+  "candidates": [
+    {
+      "candidate_id": "candidate_video_a",
+      "asset_id": "asset_video_a",
+      "source_revision": "source_rev_video_a",
+      "media_type": "video",
+      "window": {
+        "start": {
+          "num": 1,
+          "den": 1
+        },
+        "end": {
+          "num": 5,
+          "den": 1
+        }
+      },
+      "catalog_evaluation_ref": "eval_video_a",
+      "scene_group": "scene_forest",
+      "scene_hint": "Synthetic forest walk",
+      "subject_motion_hint": "unknown",
+      "review_extent": "not_reviewed",
+      "advisory_only": true,
+      "route_hint": {
+        "relative_order": 0,
+        "relative_progress": 0,
+        "coarse_region_id": "region_forest"
+      }
+    },
+    {
+      "candidate_id": "candidate_photo_b",
+      "asset_id": "asset_photo_b",
+      "source_revision": "source_rev_photo_b",
+      "media_type": "photo",
+      "window": null,
+      "catalog_evaluation_ref": null,
+      "scene_group": "scene_valley",
+      "scene_hint": "Synthetic valley still",
+      "subject_motion_hint": "unknown",
+      "review_extent": "not_reviewed",
+      "advisory_only": true,
+      "route_hint": null
+    }
+  ],
+  "music": null,
+  "output": {
+    "fps": 30,
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "total_frames": null
+  },
+  "ruleset_id": "rules_basic",
+  "ruleset_revision": "rules_rev_1",
+  "analyzer_id": "analyzer_motion",
+  "analyzer_revision": "analyzer_rev_1",
+  "policy": {
+    "capture_order": "strict",
+    "no_adjacent_rotation": true,
+    "source_upload_allowed": false,
+    "reverse_allowed": false,
+    "exact_window_evaluation_required": true
+  },
+  "budgets": {
+    "max_total_upload_bytes": 20971520,
+    "max_total_proxy_duration": {
+      "num": 60,
+      "den": 1
+    },
+    "max_proxy_duration_per_request": {
+      "num": 8,
+      "den": 1
+    },
+    "max_frames_per_request": 12,
+    "max_metadata_payload_bytes": 262144,
+    "max_evidence_payload_bytes": 1572864,
+    "max_total_image_pixels_per_request": 5000000,
+    "max_proxy_pixels_per_frame": 518400
+  }
+}

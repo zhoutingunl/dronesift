@@ -1,0 +1,74 @@
+{
+  "protocol_version": 1,
+  "kind": "evidence_receipt",
+  "job_id": "job_synthetic_trip",
+  "job_revision": 1,
+  "message_id": "msg_receipt_evaluate",
+  "producer": "client",
+  "request_message_id": "msg_evidence_request_evaluate",
+  "status": "ready",
+  "scope": {
+    "asset_id": "asset_video_a",
+    "source_revision": "source_rev_video_a",
+    "window": {
+      "start": {
+        "num": 1,
+        "den": 1
+      },
+      "end": {
+        "num": 5,
+        "den": 1
+      }
+    },
+    "speed": {
+      "num": 1,
+      "den": 1
+    },
+    "output_fps": 30,
+    "transform": {
+      "kind": "video",
+      "direction": "forward",
+      "crop": null
+    },
+    "ruleset_id": "rules_basic",
+    "ruleset_revision": "rules_rev_1",
+    "analyzer_id": "analyzer_motion",
+    "analyzer_revision": "analyzer_rev_1",
+    "measurement_revision": "measure_rev_video_a",
+    "timing_revision": "timing_rev_video_a"
+  },
+  "scope_sha256": "0076292384ecd5681c7f27c42367ba75ecd3dbd8cb2ce980131d35ad0d3f5c27",
+  "evidence": [
+    {
+      "artifact_id": "artifact_evaluation_a",
+      "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "bytes": 256,
+      "generated_from": "local_measurements",
+      "coverage": {
+        "extent": "window_metrics",
+        "source_window": {
+          "start": {
+            "num": 1,
+            "den": 1
+          },
+          "end": {
+            "num": 5,
+            "den": 1
+          }
+        },
+        "complete_stability_certification": false
+      },
+      "type": "window_evaluation",
+      "media_type": "application/json",
+      "local_evaluation_ref": "eval_video_a",
+      "checks": [
+        {"name": "activity", "status": "pass", "shot_id": null},
+        {"name": "turnback", "status": "pass", "shot_id": null},
+        {"name": "scale_reversal", "status": "pass", "shot_id": null},
+        {"name": "playback_support", "status": "pass", "shot_id": null}
+      ]
+    }
+  ],
+  "missing_channels": [],
+  "reason_codes": []
+}

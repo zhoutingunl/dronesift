@@ -1,0 +1,57 @@
+{
+  "protocol_version": 1,
+  "kind": "evidence_request",
+  "job_id": "job_synthetic_trip",
+  "job_revision": 1,
+  "message_id": "msg_request_frames",
+  "producer": "service",
+  "action": {
+    "type": "frames",
+    "scope": {
+      "asset_id": "asset_video_a",
+      "source_revision": "source_rev_video_a",
+      "window": {
+        "start": {
+          "num": 1,
+          "den": 1
+        },
+        "end": {
+          "num": 5,
+          "den": 1
+        }
+      },
+      "speed": {
+        "num": 1,
+        "den": 1
+      },
+      "output_fps": 30,
+      "transform": {
+        "kind": "video",
+        "direction": "forward",
+        "crop": null
+      },
+      "ruleset_id": "rules_basic",
+      "ruleset_revision": "rules_rev_1",
+      "analyzer_id": "analyzer_motion",
+      "analyzer_revision": "analyzer_rev_1",
+      "measurement_revision": "measure_rev_video_a",
+      "timing_revision": "timing_rev_video_a"
+    },
+    "sampling": {
+      "mode": "explicit",
+      "times": [
+        {
+          "num": 2,
+          "den": 1
+        }
+      ]
+    },
+    "basis": "source",
+    "preset": "review_640",
+    "limits": {
+      "max_bytes": 300000,
+      "max_total_image_pixels": 1000000,
+      "max_frames": 1
+    }
+  }
+}

@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "kind": "dronesift.edge_cloud.model_routing.design_example",
+  "version": "1.0.0",
+  "runtime_implemented": false,
+  "description": "Proposed routing policy; endpoint adapters and credentials are configured by the operator outside this public example.",
+  "budget_ref": "job.shared_budget",
+  "digest_encoding": "SHA-256 of JCS (RFC 8785) canonical UTF-8 JSON, not merely sorted-key compact JSON.",
+  "models": {
+    "primary_visual": {
+      "model": "glm-5.3-flash",
+      "adapter_ref": "operator_configured_official_glm_adapter",
+      "enabled": false,
+      "enable_requires": "Operator enables only after the exact endpoint/adapter/model probes below pass.",
+      "documented_modalities": ["text", "image", "video", "file"],
+      "required_probes": ["text", "multiple_image_content_blocks", "tool_call_round_trip", "structured_decision_validation"],
+      "optional_probes": ["video_clip_input"],
+      "probe_receipt_binds": ["provider_channel", "endpoint_config_digest", "adapter_version", "model", "capabilities", "limits", "expires_at"],
+      "unprobed_or_expired_capability": "Unavailable; documentation alone does not activate this route."
+    },
+    "backup_visual": {
+      "model": null,
+      "adapter_ref": null,
+      "enabled": false,
+      "enable_requires": "Operator chooses a model/channel and passes the same role-required capability probes."
+    }
+  },
+  "roles": {
+    "scene_tagger": {
+      "ordered_models": ["primary_visual", "backup_visual"],
+      "required_capabilities": ["text", "multiple_image_content_blocks", "tool_call_round_trip", "structured_decision_validation"],
+      "optional_capability": "video_clip_input",
+      "when_video_unavailable": "Timestamped images may support scene-content judgments within the shared byte budget, but are not equivalent to continuous video: subject-motion continuity stays unknown and continuity-dependent choices require NEEDS_REVIEW.",
+      "output_contract": "Evidence-scoped scene, subject continuity and photo composition judgments, including explicit unknowns."
+    },
+    "sequence_editor": {
+      "ordered_models": ["primary_visual", "backup_visual"],
+      "required_capabilities": ["text", "multiple_image_content_blocks", "tool_call_round_trip", "structured_decision_validation"],
+      "output_contract": "Shot intents and approved candidate IDs; exact source windows, rules and rendering remain client-owned."
+    }
+  },
+  "dispatch": {
+    "eligibility": "Enabled model AND fresh probe receipt AND every role-required capability AND remaining shared budget.",
+    "candidate_limits": "Enforce probed media count/size/context limits before dispatch; split evidence explicitly without silently dropping items.",
+    "tool_policy": "Intersect the runbook allowlist, active stage tools, job scope and client capability manifest; invalid configuration fails closed.",
+    "context": "Compile pinned runbook instructions and stage contract with canonical durable evidence; record the complete request digest.",
+    "context_repair": {
+      "maximum_per_job": 1,
+      "method": "Replace bulky completed results with verified summaries and artifact references; retain user constraints, evidence coverage and pending hard gates.",
+      "forbidden": ["dropping required images", "inventing a summary for unseen media", "altering a failed gate to success"]
+    },
+    "paid_attempt_reservation": "Atomically reserve token, USD, bytes and turn allowance before every attempt; primary and backup share the same ledger."
+  },
+  "failure_policy": {
+    "maximum_retries_per_stage": 1,
+    "maximum_provider_switches_per_stage": 1,
+    "retryable": ["connection_failure", "http_408", "http_429", "http_5xx", "empty_inference_response"],
+    "not_retryable_without_correction": ["authentication", "invalid_configuration", "unsupported_modality", "scope_violation", "invalid_request_schema"],
+    "backoff": "Bounded jittered backoff, honoring Retry-After only if remaining active AI time and job wall lifetime permit.",
+    "request_timeout": "Connect, stream-idle and total-response limits are each clamped to remaining active AI seconds and job wall lifetime; local action timeouts and client CPU limits are separate.",
+    "http_timeout_semantics": "Transport timeout does not prove inference stopped or billing was zero; record acceptance and cancellation as unknown unless confirmed.",
+    "unknown_charge": "Keep the attempt reservation pending reconciliation; retry or switch only if another reservation fits, otherwise NEEDS_REVIEW.",
+    "idempotency": "Use a stable request ID for tracing; claim provider-side deduplication only when the adapter has verified that guarantee.",
+    "backup_context": "Resume the current stage from durable validated evidence and pending requirements; do not rerun completed client operations.",
+    "capability_downgrade": "Forbidden: no visual-to-text fallback and no implicit tool-list expansion.",
+    "all_eligible_routes_failed": "Request client rules_draft; valid drafts are NEEDS_REVIEW, otherwise INSUFFICIENT_MATERIAL. Retain evidence and reasons; do not automatically render."
+  },
+  "observability": {
+    "per_attempt": ["job_id", "stage", "role", "request_id", "provider_channel", "model", "adapter_version", "capability_receipt_sha256", "runbook_sha256", "prompt_sha256", "evidence_ids", "latency_ms", "tokens", "reserved_usd", "settled_usd", "billing_state", "bytes", "outcome", "retry_reason"],
+    "per_decision": ["plan_revision", "evidence_scope", "structured_errors", "repair_count", "remaining_budget", "unresolved_requirements"],
+    "privacy": "Store hashes, opaque IDs and redacted summaries by default; no credentials, absolute local paths, raw GPS or full-resolution media in model logs."
+  }
+}

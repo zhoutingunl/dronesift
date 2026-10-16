@@ -1,0 +1,126 @@
+{
+  "protocol_version": 1,
+  "kind": "validation_receipt",
+  "job_id": "job_synthetic_trip",
+  "job_revision": 1,
+  "message_id": "msg_validation",
+  "producer": "client",
+  "proposal_message_id": "msg_proposal",
+  "proposal_id": "proposal_a",
+  "proposal_sha256": "455750d95e8d824ac919cf0a5085674daa4c80d29cb77dbf12a4c8dccfd60539",
+  "status": "needs_review",
+  "local_receipt_id": null,
+  "compiled_plan_sha256": null,
+  "validated_scopes": [
+    {
+      "shot_id": "shot_video_a",
+      "scope": {
+        "asset_id": "asset_video_a",
+        "source_revision": "source_rev_video_a",
+        "window": {
+          "start": {
+            "num": 1,
+            "den": 1
+          },
+          "end": {
+            "num": 5,
+            "den": 1
+          }
+        },
+        "speed": {
+          "num": 1,
+          "den": 1
+        },
+        "output_fps": 30,
+        "transform": {
+          "kind": "video",
+          "direction": "forward",
+          "crop": null
+        },
+        "ruleset_id": "rules_basic",
+        "ruleset_revision": "rules_rev_1",
+        "analyzer_id": "analyzer_motion",
+        "analyzer_revision": "analyzer_rev_1",
+        "measurement_revision": "measure_rev_video_a",
+        "timing_revision": "timing_rev_video_a"
+      },
+      "scope_sha256": "0076292384ecd5681c7f27c42367ba75ecd3dbd8cb2ce980131d35ad0d3f5c27",
+      "local_evaluation_ref": "eval_video_a"
+    }
+  ],
+  "checks": [
+    {
+      "name": "asset_identity",
+      "status": "pass",
+      "shot_id": null
+    },
+    {
+      "name": "scope_exact",
+      "status": "pass",
+      "shot_id": "shot_video_a"
+    },
+    {
+      "name": "timing_support",
+      "status": "pass",
+      "shot_id": "shot_video_a"
+    },
+    {
+      "name": "source_capacity",
+      "status": "pass",
+      "shot_id": "shot_video_a"
+    },
+    {
+      "name": "activity",
+      "status": "pass",
+      "shot_id": "shot_video_a"
+    },
+    {
+      "name": "turnback",
+      "status": "pass",
+      "shot_id": "shot_video_a"
+    },
+    {
+      "name": "scale_reversal",
+      "status": "pass",
+      "shot_id": "shot_video_a"
+    },
+    {
+      "name": "playback_support",
+      "status": "pass",
+      "shot_id": "shot_video_a"
+    },
+    {
+      "name": "capture_order",
+      "status": "pass",
+      "shot_id": null
+    },
+    {
+      "name": "rotation_adjacency",
+      "status": "pass",
+      "shot_id": null
+    },
+    {
+      "name": "photo_composition",
+      "status": "unknown",
+      "shot_id": "shot_photo_b"
+    },
+    {
+      "name": "music_coverage",
+      "status": "pass",
+      "shot_id": null
+    },
+    {
+      "name": "output_frame_coverage",
+      "status": "pass",
+      "shot_id": null
+    }
+  ],
+  "violations": [
+    {
+      "code": "MISSING_EVIDENCE",
+      "shot_id": "shot_photo_b",
+      "evidence_ref": null
+    }
+  ],
+  "report_only": true
+}

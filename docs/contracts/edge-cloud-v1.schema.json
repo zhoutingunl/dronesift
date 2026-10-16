@@ -1,0 +1,726 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:dronesift:edge-cloud:v1",
+  "title": "dronesift edge/cloud protocol v1",
+  "description": "Reviewable wire DTO proposal, not wired into runtime. Message producer fields and local receipt IDs do not establish trust. Original media, local paths, GPS, URLs and commands are not wire capabilities.",
+  "oneOf": [
+    {"$ref": "#/$defs/manifest"},
+    {"$ref": "#/$defs/evidence_request"},
+    {"$ref": "#/$defs/evidence_receipt"},
+    {"$ref": "#/$defs/edit_proposal"},
+    {"$ref": "#/$defs/validation_receipt"}
+  ],
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,95}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "time": {
+      "type": "object",
+      "properties": {"num": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}, "den": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}},
+      "required": ["num", "den"],
+      "additionalProperties": false,
+      "description": "Nonnegative rational seconds; reduce by gcd. Zero must be 0/1.",
+      "allOf": [{"if": {"properties": {"num": {"const": 0}}, "required": ["num"]}, "then": {"properties": {"den": {"const": 1}}}}]
+    },
+    "positive_rational": {
+      "type": "object",
+      "properties": {"num": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "den": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}},
+      "required": ["num", "den"],
+      "additionalProperties": false,
+      "description": "Positive normalized fraction. Fraction order/value/gcd checks are local cross-field constraints."
+    },
+    "window": {
+      "type": "object",
+      "properties": {"start": {"$ref": "#/$defs/time"}, "end": {"$ref": "#/$defs/time"}},
+      "required": ["start", "end"],
+      "additionalProperties": false,
+      "description": "Half-open source interval [start,end); local validation requires end > start."
+    },
+    "frame_range": {
+      "type": "object",
+      "properties": {"start": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}, "end": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}},
+      "required": ["start", "end"],
+      "additionalProperties": false,
+      "description": "Half-open output frame interval; local validation requires end > start."
+    },
+    "dimensions": {
+      "type": "object",
+      "properties": {"width": {"type": "integer", "minimum": 1, "maximum": 32768}, "height": {"type": "integer", "minimum": 1, "maximum": 32768}},
+      "required": ["width", "height"],
+      "additionalProperties": false
+    },
+    "crop": {
+      "type": "object",
+      "properties": {
+        "coordinate_space": {"const": "oriented_image_10000"},
+        "x": {"type": "integer", "minimum": 0, "maximum": 9999},
+        "y": {"type": "integer", "minimum": 0, "maximum": 9999},
+        "width": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "height": {"type": "integer", "minimum": 1, "maximum": 10000}
+      },
+      "required": ["coordinate_space", "x", "y", "width", "height"],
+      "additionalProperties": false,
+      "description": "Coordinates after display/EXIF orientation, in 1/10000 image units. x+width and y+height must be <=10000 locally."
+    },
+    "video_transform": {
+      "type": "object",
+      "properties": {"kind": {"const": "video"}, "direction": {"const": "forward"}, "crop": {"anyOf": [{"$ref": "#/$defs/crop"}, {"type": "null"}]}},
+      "required": ["kind", "direction", "crop"],
+      "additionalProperties": false
+    },
+    "photo_transform": {
+      "type": "object",
+      "properties": {
+        "kind": {"const": "photo"},
+        "crop": {"anyOf": [{"$ref": "#/$defs/crop"}, {"type": "null"}]},
+        "fit": {"enum": ["cover", "contain"]},
+        "zoom_start": {"$ref": "#/$defs/positive_rational"},
+        "zoom_end": {"$ref": "#/$defs/positive_rational"}
+      },
+      "required": ["kind", "crop", "fit", "zoom_start", "zoom_end"],
+      "additionalProperties": false,
+      "description": "Local renderer validates supported eased zoom and principal-subject composition; crop is a request, not certification."
+    },
+    "transform": {"oneOf": [{"$ref": "#/$defs/video_transform"}, {"$ref": "#/$defs/photo_transform"}]},
+    "scope": {
+      "type": "object",
+      "properties": {
+        "asset_id": {"$ref": "#/$defs/id"},
+        "source_revision": {"$ref": "#/$defs/id"},
+        "window": {"anyOf": [{"$ref": "#/$defs/window"}, {"type": "null"}]},
+        "speed": {"$ref": "#/$defs/positive_rational"},
+        "output_fps": {"type": "integer", "minimum": 24, "maximum": 60},
+        "transform": {"$ref": "#/$defs/transform"},
+        "ruleset_id": {"$ref": "#/$defs/id"},
+        "ruleset_revision": {"$ref": "#/$defs/id"},
+        "analyzer_id": {"$ref": "#/$defs/id"},
+        "analyzer_revision": {"$ref": "#/$defs/id"},
+        "measurement_revision": {"$ref": "#/$defs/id"},
+        "timing_revision": {"$ref": "#/$defs/id"}
+      },
+      "required": ["asset_id", "source_revision", "window", "speed", "output_fps", "transform", "ruleset_id", "ruleset_revision", "analyzer_id", "analyzer_revision", "measurement_revision", "timing_revision"],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {"properties": {"transform": {"properties": {"kind": {"const": "photo"}}, "required": ["kind"]}}, "required": ["transform"]},
+          "then": {"properties": {"window": {"type": "null"}, "speed": {"const": {"num": 1, "den": 1}}}},
+          "else": {"properties": {"window": {"$ref": "#/$defs/window"}}}
+        }
+      ]
+    },
+    "channel": {
+      "type": "object",
+      "properties": {
+        "name": {"enum": ["flow_translation", "flow_rotation", "flow_scale", "gimbal_yaw", "gimbal_pitch", "gimbal_roll", "capture_time"]},
+        "provenance": {"enum": ["measured", "derived", "unavailable", "unknown"]},
+        "origin": {"enum": ["djmd", "srt", "optical_flow", "container", "filename", "unknown"]},
+        "coverage_fraction": {"anyOf": [{"type": "number", "minimum": 0, "maximum": 1}, {"type": "null"}]}
+      },
+      "required": ["name", "provenance", "origin", "coverage_fraction"],
+      "additionalProperties": false
+    },
+    "timing": {
+      "type": "object",
+      "properties": {
+        "mode": {"enum": ["verified_cfr", "vfr", "unknown"]},
+        "fps": {"anyOf": [{"$ref": "#/$defs/positive_rational"}, {"type": "null"}]},
+        "native_time_base": {"anyOf": [{"$ref": "#/$defs/positive_rational"}, {"type": "null"}]},
+        "frame_count": {"anyOf": [{"type": "integer", "minimum": 1, "maximum": 9007199254740991}, {"type": "null"}]},
+        "mapping": {"enum": ["verified_frame_index_to_pts", "pts_only", "unverified"]},
+        "revision": {"$ref": "#/$defs/id"},
+        "presentation_start_pts": {"anyOf": [{"type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991}, {"type": "null"}]}
+      },
+      "required": ["mode", "fps", "native_time_base", "frame_count", "mapping", "revision", "presentation_start_pts"],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {"properties": {"mode": {"const": "verified_cfr"}}, "required": ["mode"]},
+          "then": {
+            "properties": {
+              "fps": {"$ref": "#/$defs/positive_rational"},
+              "native_time_base": {"$ref": "#/$defs/positive_rational"},
+              "frame_count": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+              "presentation_start_pts": {"type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991},
+              "mapping": {"const": "verified_frame_index_to_pts"}
+            }
+          }
+        }
+      ]
+    },
+    "video_asset": {
+      "type": "object",
+      "properties": {
+        "asset_id": {"$ref": "#/$defs/id"},
+        "source_revision": {"$ref": "#/$defs/id"},
+        "capture_order": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "capture_order_basis": {"enum": ["embedded_time", "filename", "user", "unknown"]},
+        "dimensions": {"$ref": "#/$defs/dimensions"},
+        "display_rotation": {"enum": [0, 90, 180, 270]},
+        "channels": {"type": "array", "items": {"$ref": "#/$defs/channel"}, "minItems": 0, "maxItems": 8},
+        "media_type": {"const": "video"},
+        "duration": {"$ref": "#/$defs/time"},
+        "timing": {"$ref": "#/$defs/timing"}
+      },
+      "required": ["asset_id", "source_revision", "capture_order", "capture_order_basis", "dimensions", "display_rotation", "channels", "media_type", "duration", "timing"],
+      "additionalProperties": false
+    },
+    "photo_asset": {
+      "type": "object",
+      "properties": {
+        "asset_id": {"$ref": "#/$defs/id"},
+        "source_revision": {"$ref": "#/$defs/id"},
+        "capture_order": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "capture_order_basis": {"enum": ["embedded_time", "filename", "user", "unknown"]},
+        "dimensions": {"$ref": "#/$defs/dimensions"},
+        "display_rotation": {"enum": [0, 90, 180, 270]},
+        "channels": {"type": "array", "items": {"$ref": "#/$defs/channel"}, "minItems": 0, "maxItems": 8},
+        "media_type": {"const": "photo"}
+      },
+      "required": ["asset_id", "source_revision", "capture_order", "capture_order_basis", "dimensions", "display_rotation", "channels", "media_type"],
+      "additionalProperties": false
+    },
+    "asset": {"oneOf": [{"$ref": "#/$defs/video_asset"}, {"$ref": "#/$defs/photo_asset"}]},
+    "route_hint": {
+      "type": "object",
+      "properties": {
+        "relative_order": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 9007199254740991}, {"type": "null"}]},
+        "relative_progress": {"anyOf": [{"type": "number", "minimum": 0, "maximum": 1}, {"type": "null"}]},
+        "coarse_region_id": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]}
+      },
+      "required": ["relative_order", "relative_progress", "coarse_region_id"],
+      "additionalProperties": false,
+      "description": "Optional relative/coarse route only. No exact GPS coordinates."
+    },
+    "candidate": {
+      "type": "object",
+      "properties": {
+        "candidate_id": {"$ref": "#/$defs/id"},
+        "asset_id": {"$ref": "#/$defs/id"},
+        "source_revision": {"$ref": "#/$defs/id"},
+        "media_type": {"enum": ["video", "photo"]},
+        "window": {"anyOf": [{"$ref": "#/$defs/window"}, {"type": "null"}]},
+        "catalog_evaluation_ref": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]},
+        "scene_group": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]},
+        "scene_hint": {"type": "string", "minLength": 1, "maxLength": 512},
+        "subject_motion_hint": {"enum": ["moving", "stationary", "mixed", "unknown"]},
+        "review_extent": {"enum": ["not_reviewed", "approximate_frames", "exact_frames", "short_proxy", "local_playback"]},
+        "advisory_only": {"const": true},
+        "route_hint": {"anyOf": [{"$ref": "#/$defs/route_hint"}, {"type": "null"}]}
+      },
+      "required": ["candidate_id", "asset_id", "source_revision", "media_type", "window", "catalog_evaluation_ref", "scene_group", "scene_hint", "subject_motion_hint", "review_extent", "advisory_only", "route_hint"],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {"properties": {"media_type": {"const": "photo"}}, "required": ["media_type"]},
+          "then": {"properties": {"window": {"type": "null"}}},
+          "else": {"properties": {"window": {"$ref": "#/$defs/window"}}}
+        }
+      ]
+    },
+    "beat": {
+      "type": "object",
+      "properties": {
+        "beat_id": {"$ref": "#/$defs/id"},
+        "time": {"$ref": "#/$defs/time"},
+        "strength": {"anyOf": [{"type": "number", "minimum": 0, "maximum": 1}, {"type": "null"}]}
+      },
+      "required": ["beat_id", "time", "strength"],
+      "additionalProperties": false
+    },
+    "slot": {
+      "type": "object",
+      "properties": {
+        "slot_id": {"$ref": "#/$defs/id"},
+        "output_frames": {"$ref": "#/$defs/frame_range"},
+        "start_beat_id": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]},
+        "end_beat_id": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]}
+      },
+      "required": ["slot_id", "output_frames", "start_beat_id", "end_beat_id"],
+      "additionalProperties": false
+    },
+    "music": {
+      "type": "object",
+      "properties": {
+        "asset_id": {"$ref": "#/$defs/id"},
+        "source_revision": {"$ref": "#/$defs/id"},
+        "decoded_sample_rate": {"type": "integer", "minimum": 8000, "maximum": 192000},
+        "decoded_samples": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+        "duration": {"$ref": "#/$defs/time"},
+        "beat_method": {"enum": ["estimated", "user_marked", "unknown"]},
+        "beats": {"type": "array", "items": {"$ref": "#/$defs/beat"}, "minItems": 0, "maxItems": 4096},
+        "slots": {"type": "array", "items": {"$ref": "#/$defs/slot"}, "minItems": 0, "maxItems": 512}
+      },
+      "required": ["asset_id", "source_revision", "decoded_sample_rate", "decoded_samples", "duration", "beat_method", "beats", "slots"],
+      "additionalProperties": false,
+      "description": "Local music metadata only; no MP3 path, audio bytes or remote URL."
+    },
+    "budgets": {
+      "type": "object",
+      "properties": {
+        "max_total_upload_bytes": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+        "max_total_proxy_duration": {"$ref": "#/$defs/time"},
+        "max_proxy_duration_per_request": {"$ref": "#/$defs/time"},
+        "max_frames_per_request": {"type": "integer", "minimum": 1, "maximum": 12},
+        "max_metadata_payload_bytes": {"type": "integer", "minimum": 1024, "maximum": 20971520},
+        "max_evidence_payload_bytes": {"type": "integer", "minimum": 1, "maximum": 1572864},
+        "max_total_image_pixels_per_request": {"type": "integer", "minimum": 1, "maximum": 5000000},
+        "max_proxy_pixels_per_frame": {"type": "integer", "minimum": 1, "maximum": 518400}
+      },
+      "required": [
+        "max_total_upload_bytes",
+        "max_total_proxy_duration",
+        "max_proxy_duration_per_request",
+        "max_frames_per_request",
+        "max_metadata_payload_bytes",
+        "max_evidence_payload_bytes",
+        "max_total_image_pixels_per_request",
+        "max_proxy_pixels_per_frame"
+      ],
+      "additionalProperties": false,
+      "description": "Per-payload structure limits do not enforce cumulative quotas. Client and server maintain a shared idempotent budget ledger."
+    },
+    "policy": {
+      "type": "object",
+      "properties": {
+        "capture_order": {"enum": ["strict", "regional", "unspecified"]},
+        "no_adjacent_rotation": {"type": "boolean"},
+        "source_upload_allowed": {"const": false},
+        "reverse_allowed": {"const": false},
+        "exact_window_evaluation_required": {"type": "boolean"}
+      },
+      "required": ["capture_order", "no_adjacent_rotation", "source_upload_allowed", "reverse_allowed", "exact_window_evaluation_required"],
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "fps": {"type": "integer", "minimum": 24, "maximum": 60},
+        "dimensions": {"$ref": "#/$defs/dimensions"},
+        "total_frames": {"anyOf": [{"type": "integer", "minimum": 1, "maximum": 9007199254740991}, {"type": "null"}]}
+      },
+      "required": ["fps", "dimensions", "total_frames"],
+      "additionalProperties": false
+    },
+    "sampling": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {"mode": {"enum": ["head_middle_tail", "photo_start_end", "photo_middle"]}},
+          "required": ["mode"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {"mode": {"const": "explicit"}, "times": {"type": "array", "items": {"$ref": "#/$defs/time"}, "minItems": 1, "maxItems": 12}},
+          "required": ["mode", "times"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "frames_action": {
+      "type": "object",
+      "properties": {
+        "type": {"const": "frames"},
+        "scope": {"$ref": "#/$defs/scope"},
+        "sampling": {"$ref": "#/$defs/sampling"},
+        "basis": {"enum": ["source", "planned_output"]},
+        "preset": {"enum": ["thumb_320", "review_640", "detail_960"]},
+        "limits": {"$ref": "#/$defs/frame_request_limits"}
+      },
+      "required": ["type", "scope", "sampling", "basis", "preset", "limits"],
+      "additionalProperties": false
+    },
+    "video_action": {
+      "type": "object",
+      "properties": {
+        "type": {"const": "video"},
+        "scope": {"$ref": "#/$defs/scope"},
+        "preset": {"enum": ["proxy_360p_preserve_fps", "proxy_540p_preserve_fps"]},
+        "audio": {"const": "none"},
+        "limits": {"$ref": "#/$defs/video_request_limits"}
+      },
+      "required": ["type", "scope", "preset", "audio", "limits"],
+      "additionalProperties": false
+    },
+    "evaluate_action": {
+      "type": "object",
+      "properties": {
+        "type": {"const": "evaluate_window"},
+        "scope": {"$ref": "#/$defs/scope"},
+        "checks": {
+          "type": "array",
+          "items": {"enum": ["activity", "turnback", "scale_reversal", "playback_support"]},
+          "minItems": 1,
+          "maxItems": 4,
+          "uniqueItems": true
+        }
+      },
+      "required": ["type", "scope", "checks"],
+      "additionalProperties": false
+    },
+    "request_action": {"oneOf": [{"$ref": "#/$defs/frames_action"}, {"$ref": "#/$defs/video_action"}, {"$ref": "#/$defs/evaluate_action"}]},
+    "coverage": {
+      "type": "object",
+      "properties": {
+        "extent": {"enum": ["single_frame", "sparse_frames", "short_proxy", "window_metrics"]},
+        "source_window": {"anyOf": [{"$ref": "#/$defs/window"}, {"type": "null"}]},
+        "complete_stability_certification": {"const": false}
+      },
+      "required": ["extent", "source_window", "complete_stability_certification"],
+      "additionalProperties": false,
+      "description": "Evidence coverage is provenance, not a claim that sparse frames establish stability."
+    },
+    "source_sample": {
+      "type": "object",
+      "properties": {
+        "basis": {"const": "source_video"},
+        "requested_time": {"$ref": "#/$defs/time"},
+        "actual_pts": {"anyOf": [{"type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991}, {"type": "null"}]},
+        "native_time_base": {"anyOf": [{"$ref": "#/$defs/positive_rational"}, {"type": "null"}]},
+        "original_frame_index": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 9007199254740991}, {"type": "null"}]},
+        "timestamp_accuracy": {"enum": ["exact_source_pts", "approximate", "unknown"]}
+      },
+      "required": ["basis", "requested_time", "actual_pts", "native_time_base", "original_frame_index", "timestamp_accuracy"],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {"properties": {"timestamp_accuracy": {"const": "exact_source_pts"}}, "required": ["timestamp_accuracy"]},
+          "then": {
+            "properties": {
+              "actual_pts": {"type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991},
+              "native_time_base": {"$ref": "#/$defs/positive_rational"}
+            }
+          }
+        }
+      ]
+    },
+    "output_sample": {
+      "type": "object",
+      "properties": {
+        "basis": {"const": "rendered_output"},
+        "output_frame": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "output_fps": {"type": "integer", "minimum": 24, "maximum": 60},
+        "plan_sha256": {"$ref": "#/$defs/sha256"},
+        "timestamp_accuracy": {"const": "exact_output_frame"}
+      },
+      "required": ["basis", "output_frame", "output_fps", "plan_sha256", "timestamp_accuracy"],
+      "additionalProperties": false
+    },
+    "photo_sample": {
+      "type": "object",
+      "properties": {
+        "basis": {"const": "source_photo"},
+        "transform_point": {"enum": ["original_fit", "start", "middle", "end"]},
+        "timestamp_accuracy": {"const": "static_photo"}
+      },
+      "required": ["basis", "transform_point", "timestamp_accuracy"],
+      "additionalProperties": false
+    },
+    "frame_evidence": {
+      "type": "object",
+      "properties": {
+        "artifact_id": {"$ref": "#/$defs/id"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "bytes": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+        "generated_from": {"enum": ["registered_original", "registered_export", "local_render", "cached_sprite", "local_measurements"]},
+        "coverage": {"$ref": "#/$defs/coverage"},
+        "type": {"const": "frame"},
+        "media_type": {"const": "image/jpeg"},
+        "dimensions": {"$ref": "#/$defs/dimensions"},
+        "sample": {"oneOf": [{"$ref": "#/$defs/source_sample"}, {"$ref": "#/$defs/output_sample"}, {"$ref": "#/$defs/photo_sample"}]}
+      },
+      "required": ["artifact_id", "sha256", "bytes", "generated_from", "coverage", "type", "media_type", "dimensions", "sample"],
+      "additionalProperties": false
+    },
+    "video_evidence": {
+      "type": "object",
+      "properties": {
+        "artifact_id": {"$ref": "#/$defs/id"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "bytes": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+        "generated_from": {"enum": ["registered_original", "registered_export", "local_render", "cached_sprite", "local_measurements"]},
+        "coverage": {"$ref": "#/$defs/coverage"},
+        "type": {"const": "video"},
+        "media_type": {"const": "video/mp4"},
+        "dimensions": {"$ref": "#/$defs/dimensions"},
+        "duration": {"$ref": "#/$defs/time"},
+        "output_fps": {"type": "integer", "minimum": 24, "maximum": 60},
+        "source_mapping_artifact_id": {"$ref": "#/$defs/id"},
+        "temporal_samples_dropped": {"type": "boolean"}
+      },
+      "required": ["artifact_id", "sha256", "bytes", "generated_from", "coverage", "type", "media_type", "dimensions", "duration", "output_fps", "source_mapping_artifact_id", "temporal_samples_dropped"],
+      "additionalProperties": false
+    },
+    "evaluation_evidence": {
+      "type": "object",
+      "properties": {
+        "artifact_id": {"$ref": "#/$defs/id"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "bytes": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+        "generated_from": {"enum": ["registered_original", "registered_export", "local_render", "cached_sprite", "local_measurements"]},
+        "coverage": {"$ref": "#/$defs/coverage"},
+        "type": {"const": "window_evaluation"},
+        "media_type": {"const": "application/json"},
+        "local_evaluation_ref": {"$ref": "#/$defs/id"},
+        "checks": {"type": "array", "items": {"$ref": "#/$defs/check"}, "minItems": 1, "maxItems": 16}
+      },
+      "required": ["artifact_id", "sha256", "bytes", "generated_from", "coverage", "type", "media_type", "local_evaluation_ref", "checks"],
+      "additionalProperties": false,
+      "description": "Client-generated check summary for planning, plus an opaque reference to the local result. An echoed summary carries no quality/profile/max or render authority."
+    },
+    "evidence": {"oneOf": [{"$ref": "#/$defs/frame_evidence"}, {"$ref": "#/$defs/video_evidence"}, {"$ref": "#/$defs/evaluation_evidence"}]},
+    "intent": {
+      "type": "object",
+      "properties": {
+        "scene_group": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]},
+        "purpose": {"enum": ["walking", "driving", "landscape", "detail", "transition", "closing", "unknown"]},
+        "subject_motion": {"enum": ["moving", "stationary", "mixed", "unknown"]},
+        "note": {"type": "string", "minLength": 1, "maxLength": 512}
+      },
+      "required": ["scene_group", "purpose", "subject_motion", "note"],
+      "additionalProperties": false,
+      "description": "Semantic intent, not a verified content assertion or authorization."
+    },
+    "shot": {
+      "type": "object",
+      "properties": {
+        "shot_id": {"$ref": "#/$defs/id"},
+        "candidate_id": {"$ref": "#/$defs/id"},
+        "asset_id": {"$ref": "#/$defs/id"},
+        "source_revision": {"$ref": "#/$defs/id"},
+        "window": {"anyOf": [{"$ref": "#/$defs/window"}, {"type": "null"}]},
+        "output_frames": {"$ref": "#/$defs/frame_range"},
+        "speed": {"$ref": "#/$defs/positive_rational"},
+        "transform": {"$ref": "#/$defs/transform"},
+        "evidence_refs": {"type": "array", "items": {"$ref": "#/$defs/id"}, "minItems": 0, "maxItems": 32, "uniqueItems": true},
+        "intent": {"$ref": "#/$defs/intent"}
+      },
+      "required": ["shot_id", "candidate_id", "asset_id", "source_revision", "window", "output_frames", "speed", "transform", "evidence_refs", "intent"],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {"properties": {"transform": {"properties": {"kind": {"const": "photo"}}, "required": ["kind"]}}, "required": ["transform"]},
+          "then": {"properties": {"window": {"type": "null"}, "speed": {"const": {"num": 1, "den": 1}}}},
+          "else": {"properties": {"window": {"$ref": "#/$defs/window"}}}
+        }
+      ]
+    },
+    "check": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "enum": ["asset_identity", "scope_exact", "timing_support", "source_capacity", "activity", "turnback", "scale_reversal", "playback_support", "capture_order", "rotation_adjacency", "photo_composition", "music_coverage", "output_frame_coverage"]
+        },
+        "status": {"enum": ["pass", "fail", "unknown", "not_applicable"]},
+        "shot_id": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]}
+      },
+      "required": ["name", "status", "shot_id"],
+      "additionalProperties": false
+    },
+    "violation": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "enum": [
+            "SOURCE_CHANGED",
+            "SCOPE_MISMATCH",
+            "MISSING_EVIDENCE",
+            "UNSUPPORTED_TIMING",
+            "SOURCE_TOO_SHORT",
+            "ACTIVITY_FAILED",
+            "TURNBACK_DETECTED",
+            "SCALE_REVERSAL",
+            "PLAYBACK_UNSUPPORTED",
+            "ORDER_CONFLICT",
+            "ADJACENT_ROTATION",
+            "PHOTO_CROP_CONFLICT",
+            "MUSIC_MISMATCH",
+            "OUTPUT_GAP_OR_OVERLAP",
+            "STALE_REVISION",
+            "BUDGET_EXCEEDED"
+          ]
+        },
+        "shot_id": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]},
+        "evidence_ref": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]}
+      },
+      "required": ["code", "shot_id", "evidence_ref"],
+      "additionalProperties": false
+    },
+    "validated_scope": {
+      "type": "object",
+      "properties": {
+        "shot_id": {"$ref": "#/$defs/id"},
+        "scope": {"$ref": "#/$defs/scope"},
+        "scope_sha256": {"$ref": "#/$defs/sha256"},
+        "local_evaluation_ref": {"$ref": "#/$defs/id"}
+      },
+      "required": ["shot_id", "scope", "scope_sha256", "local_evaluation_ref"],
+      "additionalProperties": false
+    },
+    "manifest": {
+      "type": "object",
+      "properties": {
+        "protocol_version": {"const": 1},
+        "kind": {"const": "manifest"},
+        "job_id": {"$ref": "#/$defs/id"},
+        "job_revision": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "message_id": {"$ref": "#/$defs/id"},
+        "stage": {"enum": ["estimate", "planning", "review"]},
+        "assets": {"type": "array", "items": {"$ref": "#/$defs/asset"}, "minItems": 1, "maxItems": 512},
+        "candidates": {"type": "array", "items": {"$ref": "#/$defs/candidate"}, "minItems": 0, "maxItems": 2048},
+        "music": {"anyOf": [{"$ref": "#/$defs/music"}, {"type": "null"}]},
+        "output": {"$ref": "#/$defs/output"},
+        "ruleset_id": {"$ref": "#/$defs/id"},
+        "ruleset_revision": {"$ref": "#/$defs/id"},
+        "analyzer_id": {"$ref": "#/$defs/id"},
+        "analyzer_revision": {"$ref": "#/$defs/id"},
+        "policy": {"$ref": "#/$defs/policy"},
+        "budgets": {"$ref": "#/$defs/budgets"},
+        "producer": {"const": "client"}
+      },
+      "required": ["protocol_version", "kind", "job_id", "job_revision", "message_id", "stage", "assets", "candidates", "music", "output", "ruleset_id", "ruleset_revision", "analyzer_id", "analyzer_revision", "policy", "budgets", "producer"],
+      "additionalProperties": false
+    },
+    "evidence_request": {
+      "type": "object",
+      "properties": {
+        "protocol_version": {"const": 1},
+        "kind": {"const": "evidence_request"},
+        "job_id": {"$ref": "#/$defs/id"},
+        "job_revision": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "message_id": {"$ref": "#/$defs/id"},
+        "action": {"$ref": "#/$defs/request_action"},
+        "producer": {"const": "service"}
+      },
+      "required": ["protocol_version", "kind", "job_id", "job_revision", "message_id", "action", "producer"],
+      "additionalProperties": false
+    },
+    "evidence_receipt": {
+      "type": "object",
+      "properties": {
+        "protocol_version": {"const": 1},
+        "kind": {"const": "evidence_receipt"},
+        "job_id": {"$ref": "#/$defs/id"},
+        "job_revision": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "message_id": {"$ref": "#/$defs/id"},
+        "request_message_id": {"$ref": "#/$defs/id"},
+        "status": {"enum": ["ready", "insufficient", "unsupported", "stale", "rejected", "budget_exceeded"]},
+        "scope": {"$ref": "#/$defs/scope"},
+        "scope_sha256": {"$ref": "#/$defs/sha256"},
+        "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}, "minItems": 0, "maxItems": 12},
+        "missing_channels": {
+          "type": "array",
+          "items": {"enum": ["flow_translation", "flow_rotation", "flow_scale", "gimbal_yaw", "gimbal_pitch", "gimbal_roll"]},
+          "minItems": 0,
+          "maxItems": 6,
+          "uniqueItems": true
+        },
+        "reason_codes": {
+          "type": "array",
+          "items": {
+            "enum": ["MISSING_CHANNEL", "LOW_COVERAGE", "UNSUPPORTED_TIMING", "UNSUPPORTED_MODALITY", "SCOPE_OUTSIDE_ASSET", "SOURCE_CHANGED", "STALE_REVISION", "BUDGET_EXCEEDED", "NO_EVIDENCE", "INVALID_REQUEST"]
+          },
+          "minItems": 0,
+          "maxItems": 10,
+          "uniqueItems": true
+        },
+        "producer": {"const": "client"}
+      },
+      "required": ["protocol_version", "kind", "job_id", "job_revision", "message_id", "request_message_id", "status", "scope", "scope_sha256", "evidence", "missing_channels", "reason_codes", "producer"],
+      "additionalProperties": false,
+      "allOf": [{"if": {"properties": {"status": {"const": "ready"}}, "required": ["status"]}, "then": {"properties": {"evidence": {"minItems": 1}}}}]
+    },
+    "edit_proposal": {
+      "type": "object",
+      "properties": {
+        "protocol_version": {"const": 1},
+        "kind": {"const": "edit_proposal"},
+        "job_id": {"$ref": "#/$defs/id"},
+        "job_revision": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "message_id": {"$ref": "#/$defs/id"},
+        "proposal_id": {"$ref": "#/$defs/id"},
+        "music_asset_id": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]},
+        "music_source_revision": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]},
+        "output": {"$ref": "#/$defs/output"},
+        "shots": {"type": "array", "items": {"$ref": "#/$defs/shot"}, "minItems": 1, "maxItems": 512},
+        "producer": {"const": "service"}
+      },
+      "required": ["protocol_version", "kind", "job_id", "job_revision", "message_id", "proposal_id", "music_asset_id", "music_source_revision", "output", "shots", "producer"],
+      "additionalProperties": false
+    },
+    "validation_receipt": {
+      "type": "object",
+      "properties": {
+        "protocol_version": {"const": 1},
+        "kind": {"const": "validation_receipt"},
+        "job_id": {"$ref": "#/$defs/id"},
+        "job_revision": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "message_id": {"$ref": "#/$defs/id"},
+        "proposal_message_id": {"$ref": "#/$defs/id"},
+        "proposal_id": {"$ref": "#/$defs/id"},
+        "proposal_sha256": {"$ref": "#/$defs/sha256"},
+        "status": {"enum": ["valid", "invalid", "insufficient", "stale", "needs_review"]},
+        "local_receipt_id": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]},
+        "compiled_plan_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "validated_scopes": {"type": "array", "items": {"$ref": "#/$defs/validated_scope"}, "minItems": 0, "maxItems": 512},
+        "checks": {"type": "array", "items": {"$ref": "#/$defs/check"}, "minItems": 0, "maxItems": 8192},
+        "violations": {"type": "array", "items": {"$ref": "#/$defs/violation"}, "minItems": 0, "maxItems": 512},
+        "report_only": {"const": true},
+        "producer": {"const": "client"}
+      },
+      "required": [
+        "protocol_version",
+        "kind",
+        "job_id",
+        "job_revision",
+        "message_id",
+        "proposal_message_id",
+        "proposal_id",
+        "proposal_sha256",
+        "status",
+        "local_receipt_id",
+        "compiled_plan_sha256",
+        "validated_scopes",
+        "checks",
+        "violations",
+        "report_only",
+        "producer"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"const": "valid"}}, "required": ["status"]},
+          "then": {
+            "properties": {
+              "compiled_plan_sha256": {"$ref": "#/$defs/sha256"},
+              "violations": {"maxItems": 0},
+              "checks": {"minItems": 1, "items": {"properties": {"status": {"enum": ["pass", "not_applicable"]}}}},
+              "local_receipt_id": {"$ref": "#/$defs/id"}
+            }
+          }
+        }
+      ],
+      "description": "Client-produced report only. Schema cannot authenticate sender or prove local receipt existence. needs_review leaves semantic checks unresolved."
+    },
+    "frame_request_limits": {
+      "type": "object",
+      "properties": {
+        "max_bytes": {"type": "integer", "minimum": 1, "maximum": 1572864},
+        "max_total_image_pixels": {"type": "integer", "minimum": 1, "maximum": 5000000},
+        "max_frames": {"type": "integer", "minimum": 1, "maximum": 12}
+      },
+      "required": ["max_bytes", "max_total_image_pixels", "max_frames"],
+      "additionalProperties": false
+    },
+    "video_request_limits": {
+      "type": "object",
+      "properties": {
+        "max_bytes": {"type": "integer", "minimum": 1, "maximum": 1572864},
+        "max_pixels_per_frame": {"type": "integer", "minimum": 1, "maximum": 518400},
+        "max_output_duration": {"$ref": "#/$defs/time"}
+      },
+      "required": ["max_bytes", "max_pixels_per_frame", "max_output_duration"],
+      "additionalProperties": false,
+      "description": "Single proxy limits; FPS is preserved. Duration and dimensions are checked locally against scope and job budgets."
+    }
+  }
+}

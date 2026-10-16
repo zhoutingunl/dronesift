@@ -301,6 +301,11 @@ untick what you don't want and re-export the selection losslessly into `<out>/ex
 
 ## Status & caveats
 
+The proposed [edge/cloud architecture](docs/architecture/distributed-editing.zh-CN.md)
+keeps media analysis, rules and rendering on the client, with a server for AI editing
+decisions and small, on-demand previews. It includes draft message schemas, runbook,
+model fallback and recovery policies; the remote service is not implemented yet.
+
 - Thresholds were tuned on a handful of Air 3S flights (4K30–60); treat them as a starting
   point and tune per shoot. Feedback from other models highly welcome.
 - This is not an official DJI product and is not affiliated with DJI. The `djmd` format is

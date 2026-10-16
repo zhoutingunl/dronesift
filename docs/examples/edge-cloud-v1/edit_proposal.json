@@ -1,0 +1,100 @@
+{
+  "protocol_version": 1,
+  "kind": "edit_proposal",
+  "job_id": "job_synthetic_trip",
+  "job_revision": 1,
+  "message_id": "msg_proposal",
+  "producer": "service",
+  "proposal_id": "proposal_a",
+  "music_asset_id": "asset_music_c",
+  "music_source_revision": "source_rev_music_c",
+  "output": {
+    "fps": 30,
+    "dimensions": {
+      "width": 1920,
+      "height": 1080
+    },
+    "total_frames": 180
+  },
+  "shots": [
+    {
+      "shot_id": "shot_video_a",
+      "candidate_id": "candidate_video_a",
+      "asset_id": "asset_video_a",
+      "source_revision": "source_rev_video_a",
+      "window": {
+        "start": {
+          "num": 1,
+          "den": 1
+        },
+        "end": {
+          "num": 5,
+          "den": 1
+        }
+      },
+      "output_frames": {
+        "start": 0,
+        "end": 120
+      },
+      "speed": {
+        "num": 1,
+        "den": 1
+      },
+      "transform": {
+        "kind": "video",
+        "direction": "forward",
+        "crop": null
+      },
+      "evidence_refs": [
+        "artifact_frame_a"
+      ],
+      "intent": {
+        "scene_group": "scene_forest",
+        "purpose": "walking",
+        "subject_motion": "unknown",
+        "note": "Select a forward forest view; local activity evaluation still required."
+      }
+    },
+    {
+      "shot_id": "shot_photo_b",
+      "candidate_id": "candidate_photo_b",
+      "asset_id": "asset_photo_b",
+      "source_revision": "source_rev_photo_b",
+      "window": null,
+      "output_frames": {
+        "start": 120,
+        "end": 180
+      },
+      "speed": {
+        "num": 1,
+        "den": 1
+      },
+      "transform": {
+        "kind": "photo",
+        "crop": {
+          "coordinate_space": "oriented_image_10000",
+          "x": 0,
+          "y": 0,
+          "width": 10000,
+          "height": 10000
+        },
+        "fit": "cover",
+        "zoom_start": {
+          "num": 1,
+          "den": 1
+        },
+        "zoom_end": {
+          "num": 103,
+          "den": 100
+        }
+      },
+      "evidence_refs": [],
+      "intent": {
+        "scene_group": "scene_valley",
+        "purpose": "closing",
+        "subject_motion": "unknown",
+        "note": "Close with a synthetic valley photo; preserve the horizon."
+      }
+    }
+  ]
+}
