@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "kind": "dronesift.edge_cloud.model_routing.design_example",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "runtime_implemented": false,
   "description": "Proposed routing policy; endpoint adapters and credentials are configured by the operator outside this public example.",
   "budget_ref": "job.shared_budget",
@@ -37,13 +37,19 @@
       "ordered_models": ["primary_visual", "backup_visual"],
       "required_capabilities": ["text", "multiple_image_content_blocks", "tool_call_round_trip", "structured_decision_validation"],
       "output_contract": "Shot intents and approved candidate IDs; exact source windows, rules and rendering remain client-owned."
+    },
+    "sop_learner": {
+      "ordered_models": ["primary_visual", "backup_visual"],
+      "required_capabilities": ["text", "tool_call_round_trip", "structured_decision_validation"],
+      "allowed_server_tools": ["sop_search", "sop_view", "sop_propose_patch"],
+      "output_contract": "Grounded private candidate patches, scoped preferences, code issue candidates or NO_CHANGE. No new visual facts, client media actions or direct active-SOP edits."
     }
   },
   "dispatch": {
     "eligibility": "Enabled model AND fresh probe receipt AND every role-required capability AND remaining shared budget.",
     "candidate_limits": "Enforce probed media count/size/context limits before dispatch; split evidence explicitly without silently dropping items.",
-    "tool_policy": "Intersect the runbook allowlist, active stage tools, job scope and client capability manifest; invalid configuration fails closed.",
-    "context": "Compile pinned runbook instructions and stage contract with canonical durable evidence; record the complete request digest.",
+    "tool_policy": "Client actions intersect client allowlist, active-stage tools, job scope and client capabilities. Server SOP reads use a separate stage allowlist; learning writes only private candidate proposals through its own whitelist. Invalid configuration fails closed.",
+    "context": "Compile pinned runbook, stage contract, selected SOP ID/version/hash snapshot and durable evidence; record the complete request digest. SOP content never grants tool or rule authority.",
     "context_repair": {
       "maximum_per_job": 1,
       "method": "Replace bulky completed results with verified summaries and artifact references; retain user constraints, evidence coverage and pending hard gates.",
@@ -59,15 +65,19 @@
     "backoff": "Bounded jittered backoff, honoring Retry-After only if remaining active AI time and job wall lifetime permit.",
     "request_timeout": "Connect, stream-idle and total-response limits are each clamped to remaining active AI seconds and job wall lifetime; local action timeouts and client CPU limits are separate.",
     "http_timeout_semantics": "Transport timeout does not prove inference stopped or billing was zero; record acceptance and cancellation as unknown unless confirmed.",
-    "unknown_charge": "Keep the attempt reservation pending reconciliation; retry or switch only if another reservation fits, otherwise NEEDS_REVIEW.",
+    "unknown_charge": "Keep the attempt reservation pending reconciliation; retry or switch only if another reservation fits, otherwise apply the role-specific failure action.",
     "idempotency": "Use a stable request ID for tracing; claim provider-side deduplication only when the adapter has verified that guarantee.",
-    "backup_context": "Resume the current stage from durable validated evidence and pending requirements; do not rerun completed client operations.",
+    "backup_context": "Resume the current stage from durable validated evidence, the same selected SOP snapshot and pending requirements; do not rerun completed client operations or reset optional learning quotas.",
     "capability_downgrade": "Forbidden: no visual-to-text fallback and no implicit tool-list expansion.",
-    "all_eligible_routes_failed": "Request client rules_draft; valid drafts are NEEDS_REVIEW, otherwise INSUFFICIENT_MATERIAL. Retain evidence and reasons; do not automatically render."
+    "all_eligible_routes_failed": "Apply the role-specific failure action; never apply main-film fallback to optional learning.",
+    "role_failure_actions": {
+      "default_editing": "Request client rules_draft; valid drafts are NEEDS_REVIEW, otherwise INSUFFICIENT_MATERIAL. Retain evidence and reasons; do not automatically render.",
+      "sop_learner": "Defer or fail only the learning job; preserve feedback and pending charge reservations. Main-film state and accepted plans remain unchanged; no client media actions. Retry only within authorized parent reservations and lifetime."
+    }
   },
   "observability": {
     "per_attempt": ["job_id", "stage", "role", "request_id", "provider_channel", "model", "adapter_version", "capability_receipt_sha256", "runbook_sha256", "prompt_sha256", "evidence_ids", "latency_ms", "tokens", "reserved_usd", "settled_usd", "billing_state", "bytes", "outcome", "retry_reason"],
-    "per_decision": ["plan_revision", "evidence_scope", "structured_errors", "repair_count", "remaining_budget", "unresolved_requirements"],
+    "per_decision": ["plan_revision", "evidence_scope", "selected_sop_versions_hashes", "sop_application_refs", "structured_errors", "repair_count", "remaining_budget", "unresolved_requirements"],
     "privacy": "Store hashes, opaque IDs and redacted summaries by default; no credentials, absolute local paths, raw GPS or full-resolution media in model logs."
   }
 }

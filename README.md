@@ -305,6 +305,8 @@ The proposed [edge/cloud architecture](docs/architecture/distributed-editing.zh-
 keeps media analysis, rules and rendering on the client, with a server for AI editing
 decisions and small, on-demand previews. It includes draft message schemas, runbook,
 model fallback and recovery policies; the remote service is not implemented yet.
+The [editorial SOP learning design](docs/architecture/editorial-sop-learning.zh-CN.md)
+adds bounded experience retrieval, private feedback learning and versioned rollback.
 
 - Thresholds were tuned on a handful of Air 3S flights (4K30–60); treat them as a starting
   point and tune per shoot. Feedback from other models highly welcome.

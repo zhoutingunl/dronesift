@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "kind": "dronesift.editorial_sop.design_example",
+  "runtime_implemented": false,
+  "id": "continuous_vehicle_motion",
+  "version": "1.0.0",
+  "content_sha256": null,
+  "digest_policy": "Compute a canonical content digest when implemented; null is an explicit placeholder, not a verified hash.",
+  "title": "Preserve continuous driving without discarding distinctive stopped views",
+  "status": "candidate",
+  "visibility": "private",
+  "synthetic": true,
+  "purpose": "A composable editing heuristic, not a scenic-location runbook, executable skill or movement certificate.",
+  "retrieval": {
+    "stages": ["sequence_intent", "validation_and_repair"],
+    "intent_cues": ["continuous driving", "vehicle journey", "maintain action continuity"],
+    "observed_cues": ["vehicle subject", "possible movement-to-stop transition", "repeated vehicle and landscape views"],
+    "filter_first": ["tenant authorization", "enabled status", "stage", "compatible rule and evidence versions"],
+    "match_is_not_proof": "A retrieval match neither establishes vehicle movement nor authorizes applying this SOP."
+  },
+  "preconditions": {
+    "user_intent": "The current job requests a sense of continuous driving; this is not inferred from vehicle presence alone.",
+    "subject": "Inspected evidence identifies a vehicle as a relevant subject.",
+    "motion_evidence": "Movement, stopping and continuity claims require timestamped motion evidence over the claimed scope; sparse stills cannot prove them.",
+    "unknown": "Request one bounded relevant preview if permitted by remaining budget; otherwise retain unknown and defer the affected claim.",
+    "scope": "Every claim binds asset revision, actual source window, playback speed, output FPS and inspected evidence IDs."
+  },
+  "procedure": [
+    {
+      "step": "inspect_action_continuity",
+      "instruction": "Inspect the previous ending, proposed shot and next opening. Separate vehicle movement, camera movement and an unobserved gap; do not assume travel was uninterrupted."
+    },
+    {
+      "step": "resolve_uncertain_transitions",
+      "instruction": "For an uncertain start, stop or reversal, request a bounded muted proxy covering the relevant transition at the proposed playback speed and output FPS. Stay inside existing upload and preview budgets."
+    },
+    {
+      "step": "propose_solver_preferences",
+      "instruction": "Prefer verified moving windows that preserve the requested action, chronology and content variety. Suggest trimming or replacing redundant stopping intervals; the client solver determines feasible exact windows and slots."
+    },
+    {
+      "step": "check_distinctive_exception",
+      "instruction": "Retain a stopped view when authorized and it contributes independently evidenced distant mountains, clouds or difficult terrain ahead that alternatives lack. Explain its narrative role instead of treating every stop as redundant."
+    },
+    {
+      "step": "recheck_result",
+      "instruction": "Run existing local validation and inspect the affected joins using the actual proposed windows and speed. Recheck semantic coverage after trimming; a prior parent-window observation cannot certify an unseen new join."
+    }
+  ],
+  "authority": {
+    "allowed_effects": ["shot_intent", "solver_preferences", "bounded_evidence_requests"],
+    "forbidden_changes": ["tool permissions", "budgets", "physical rules", "quality profiles", "user hard requirements", "render authorization"],
+    "precedence": "Runtime contracts and current user policy take precedence over all SOP recommendations.",
+    "exception_authorization": "Reuse an existing job allowance. If retention contradicts an explicit hard requirement, only a user-authorized policy revision can permit it; do not repeatedly request an authorization already given."
+  },
+  "counterexamples": [
+    "A parked vehicle reveals a unique distant plateau, cloud formation or difficult route ahead.",
+    "A vehicle appears stationary in two sparse images but moves between them; stills are insufficient evidence.",
+    "The intended chapter concerns arrival or exploration rather than continuous driving."
+  ],
+  "provenance": {
+    "type": "synthetic_feedback_example",
+    "feedback_event_ref": "feedback_synthetic_001",
+    "feedback_summary": "Illustrative request to remove a redundant stop between driving shots while retaining a distinctive authorized landscape view.",
+    "before_proposal_ref": "proposal_synthetic_before",
+    "after_proposal_ref": "proposal_synthetic_after",
+    "review_scope": {
+      "evidence_ref": "evidence_synthetic_proxy_001",
+      "asset_id": "asset_synthetic_01",
+      "source_revision": "revision_synthetic_01",
+      "source_window": {"start": {"num": 10, "den": 1}, "end": {"num": 16, "den": 1}},
+      "playback_speed": {"num": 3, "den": 2},
+      "output_fps": 30,
+      "coverage": "short_proxy",
+      "review_status": "synthetic_example_not_an_actual_review"
+    },
+    "limits": "All references are synthetic. No original media, private feedback or actual improvement result is represented."
+  },
+  "promotion_policy": {
+    "current_job": "An explicit user correction applies immediately to the current job revision; learning must not delay it.",
+    "candidate_creation": "Automatically extract a private candidate with provenance, conditions, exceptions and uncertainty; no confirmation is required for every candidate.",
+    "private_trial": "Allow a bounded, reversible trial under existing user policy; pin each decision snapshot, record applied SOP versions in the plan, and retain the previous plan.",
+    "explicit_preference": "Persist an expressly stated user preference at its stated scope without repeatedly asking; do not silently turn a local exception into a universal preference.",
+    "generalization": "Before wider cross-task activation, compare replay baselines, independent capture sessions and counterexamples; one correction or model self-rating is insufficient.",
+    "public_release": "Requires separately authorized sharing and maintained review/redaction; private learning never automatically publishes user material."
+  },
+  "conflicts_and_rollback": {
+    "conflict": "Follow current explicit user intent and hard requirements. If SOPs recommend incompatible edits, preserve uncertainty or omit the weaker recommendation rather than blend away the conflict.",
+    "disable": "Disable a specific SOP version by its verified digest; record the reason and stop selecting it for new plan revisions.",
+    "existing_plans": "Do not silently mutate pinned plans. Revert trial preferences and revalidate in a new revision; do not bypass existing cancellation or commit rules.",
+    "triggers": ["repeated corrective feedback", "contradicting counterexample", "worse continuity or variety", "incompatible evidence or rule version"]
+  },
+  "evaluation": {
+    "status": "intended_metrics_not_measured_results",
+    "track": ["SOP actually applied, not merely retrieved", "action-continuity blind preference", "unique-scene retention", "repeat user corrections", "extra preview bytes and model cost"],
+    "baseline": "Same candidate catalog, music grid, task policy and rule versions without this SOP.",
+    "prerequisite": "All unchanged local technical and user-policy gates must pass; technical success alone does not demonstrate editorial improvement."
+  }
+}
